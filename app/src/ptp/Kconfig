@@ -1,0 +1,71 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+menuconfig ZMK_TRACKPAD
+    bool "Native multitouch touchpad (PTP)"
+    depends on !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
+    depends on ZMK_USB || ZMK_BLE
+    help
+      Enable native contact reporting over a separate USB HID interface and
+      Bluetooth HID service. Drivers submit full snapshots via zmk/ptp.h.
+      This does not enable sensor drivers or split contact transport.
+      Native touchpad mode only; no mouse-mode fallback or Windows certification.
+
+if ZMK_TRACKPAD
+
+config ZMK_TRACKPAD_FINGERS
+    int "Maximum concurrent contacts"
+    range 3 5
+    default 5
+
+config ZMK_TRACKPAD_LOGICAL_X
+    int "Maximum X coordinate"
+    range 1 32767
+    default 4095
+
+config ZMK_TRACKPAD_LOGICAL_Y
+    int "Maximum Y coordinate"
+    range 1 32767
+    default 4095
+
+config ZMK_TRACKPAD_PHYSICAL_X
+    int "Surface width in tenths of a millimeter"
+    range 1 32767
+    default 1000
+    help
+      Set this to the actual active surface width, not the PCB width.
+      The default is a placeholder, not a sensor calibration.
+
+config ZMK_TRACKPAD_PHYSICAL_Y
+    int "Surface height in tenths of a millimeter"
+    range 1 32767
+    default 1000
+
+config ZMK_TRACKPAD_PAD_TYPE
+    int "Button type (0 clickpad, 1 pressure pad, 2 external buttons only)"
+    range 0 2
+    default 2
+
+if ZMK_BLE
+
+config ZMK_BLE_PTP_REPORT_QUEUE_SIZE
+    int "Maximum complete PTP reports queued for Bluetooth"
+    range 1 64
+    default 8
+
+endif
+
+if ZMK_USB
+
+config USB_HID_DEVICE_COUNT
+    default 2
+
+config HID_INTERRUPT_EP_MPS
+    default 64
+
+config USB_REQUEST_BUFFER_SIZE
+    default 512
+
+endif
+
+endif
