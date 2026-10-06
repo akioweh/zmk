@@ -8,6 +8,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zmk/ptp/frame.h>
+#include <zmk/activity.h>
 
 uint16_t zmk_ptp_scan_time(void) {
     return (uint16_t)(k_ticks_to_us_floor64(k_uptime_ticks()) / 100);
@@ -31,6 +32,16 @@ int zmk_ptp_validate_frame(const struct zmk_ptp_frame *frame) {
         seen |= BIT(contact->id);
     }
     return 0;
+}
+
+void zmk_ptp_note_activity(const struct zmk_ptp_frame *frame) {
+    bool intentional = frame->buttons != 0;
+    for (int i = 0; i < frame->contact_count; i++) {
+        intentional |= frame->contacts[i].confidence;
+    }
+    if (intentional) {
+        zmk_activity_note();
+    }
 }
 
 void zmk_ptp_split_encode(struct zmk_ptp_split_frame *wire, uint16_t sequence,

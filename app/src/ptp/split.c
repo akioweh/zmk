@@ -163,6 +163,7 @@ int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) {
     if (err) {
         return err;
     }
+    zmk_ptp_note_activity(frame);
     if (k_mutex_lock(&lock, K_NO_WAIT)) {
         return -EAGAIN;
     }

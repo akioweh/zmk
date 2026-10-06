@@ -28,6 +28,8 @@ static int sent_count;
 static int usb_error;
 static int ble_error;
 
+int zmk_activity_note(void) { return 0; }
+
 bool zmk_endpoint_instance_eq(struct zmk_endpoint_instance a, struct zmk_endpoint_instance b) {
     return a.transport == b.transport &&
            (a.transport != ZMK_TRANSPORT_BLE || a.ble.profile_index == b.ble.profile_index);

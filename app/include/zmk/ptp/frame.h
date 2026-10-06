@@ -15,6 +15,7 @@ struct zmk_ptp_split_frame {
 };
 
 int zmk_ptp_validate_frame(const struct zmk_ptp_frame *frame);
+void zmk_ptp_note_activity(const struct zmk_ptp_frame *frame);
 void zmk_ptp_split_encode(struct zmk_ptp_split_frame *wire, uint16_t sequence,
                           const struct zmk_ptp_frame *frame);
 int zmk_ptp_split_decode(const struct zmk_ptp_split_frame *wire, uint16_t *sequence,

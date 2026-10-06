@@ -183,6 +183,7 @@ int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) {
     if (validation) {
         return validation;
     }
+    zmk_ptp_note_activity(frame);
     if (k_mutex_lock(&ptp_lock, K_NO_WAIT)) {
         return -EAGAIN;
     }

@@ -4,7 +4,7 @@ This fork ports the HID interface from [Pete Johanson's PTP prototype](https://g
 It exposes a separate USB HID interface and Bluetooth HID service using the same descriptor and report encoder.
 The target is native Linux touchpad input, not firmware-side gestures or Windows certification.
 
-**There is no raw-contact sensor adapter yet.** Split contact forwarding is implemented for the existing BLE and wired transports. Existing mouse input listeners are unchanged. Enabling this feature alone does not make an Azoteq trackpad multitouch.
+Sensor adapters belong in external ZMK modules and use the public producer API; this fork contains only the generic PTP infrastructure. Split contact forwarding uses the existing BLE and wired transports. Existing mouse input listeners are unchanged; remove any legacy listener/driver for the same touchpad to avoid duplicate pointer events.
 
 ## Configuration
 
@@ -45,7 +45,7 @@ int err = zmk_ptp_submit_frame(&frame);
 
 ## Split forwarding
 
-The producer uses the same `zmk_ptp_submit_frame()` and `zmk_ptp_release()` API on either half. No sensor-specific adapter, scalar input listener or second split stack is involved:
+The producer uses the same `zmk_ptp_submit_frame()` and `zmk_ptp_release()` API on either half. No sensor-specific transport, scalar input listener or second split stack is involved:
 
 `producer → complete frame → existing split event routing → central core → USB/BLE host`
 
@@ -78,8 +78,10 @@ ZEPHYR_TOOLCHAIN_VARIANT=host west build <zmk>/app/tests/ptp \
 build/ptp-peripheral-tests/zephyr/zephyr.exe
 ```
 
+Sensor decoding and driver tests belong to their respective external modules.
+
 These tests exercise real core state/encoding/workqueue behavior with mocked USB/BLE admission. They check contact lifecycles, descriptor lengths/units, malformed frames, backpressure, endpoint routing, selective reporting, suspend/reset and ISR rejection, plus split encoding, sequence wrap/gaps, heartbeat/lease expiry, overflow recovery, offline lifts and fragmented/corrupt wired framing. They do not simulate radio delivery or host recognition.
 
-For a compile-only firmware check, add `-DEXTRA_CONF_FILE=<zmk>/app/tests/ptp/firmware.conf` to a central build, or `-DEXTRA_CONF_FILE=<zmk>/app/tests/ptp/peripheral-firmware.conf` to a peripheral build. Its dimensions are synthetic; do not use them as sensor calibration. Normal firmware leaves PTP disabled.
+For a compile-only firmware check, add `-DEXTRA_CONF_FILE=<zmk>/app/tests/ptp/firmware.conf` to a central build, or `-DEXTRA_CONF_FILE=<zmk>/app/tests/ptp/peripheral-firmware.conf` to a peripheral build. Its dimensions are synthetic; do not use them as sensor calibration. PTP remains opt-in at the ZMK level; board/config repositories can enable the driver.
 
-Physical USB/Bluetooth enumeration, libinput behavior, radio throughput and disconnect/suspend races still require hardware validation once a contact producer is connected.
+Physical USB/Bluetooth enumeration, libinput behavior, radio throughput and disconnect/suspend races still require hardware validation with the sensor and both halves connected.
