@@ -12,5 +12,19 @@ config ZMK_BLE
     bool
     default y
 
+config ZMK_SPLIT
+    bool
+    default y
+
+config ZMK_SPLIT_ROLE_CENTRAL
+    bool "Split central test variant"
+    default y
+
+config ZMK_TRACKPAD_PHYSICAL_X
+    default 500
+
+config ZMK_TRACKPAD_PHYSICAL_Y
+    default 500
+
 rsource "../../src/ptp/Kconfig"
 source "Kconfig.zephyr"

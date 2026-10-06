@@ -11,6 +11,9 @@
 #include <zephyr/ztest.h>
 #include <zmk/endpoints.h>
 #include "hid.h"
+#include <zmk/ptp/split.h>
+#include <zephyr/sys/crc.h>
+#include "../../../src/split/wired/wired.h"
 
 static const struct zmk_endpoint_instance usb = {.transport = ZMK_TRANSPORT_USB};
 static const struct zmk_endpoint_instance ble0 = {.transport = ZMK_TRANSPORT_BLE,
@@ -68,6 +71,7 @@ static struct zmk_ptp_report last(void) {
 
 static void before(void *fixture) {
     usb_error = ble_error = 0;
+    zmk_ptp_split_reset();
     zmk_ptp_set_endpoint((struct zmk_endpoint_instance){0});
     zmk_ptp_reset_endpoint(usb);
     for (int i = 0; i < ZMK_BLE_PROFILE_COUNT; i++) {
@@ -336,6 +340,181 @@ ZTEST(ptp, test_descriptor_matches_wire_layout_and_units) {
     zassert_equal(feature_bits[ZMK_PTP_REPORT_ID_CERTIFICATION], 256 * 8);
     zassert_equal(feature_bits[ZMK_PTP_REPORT_ID_MODE], 8);
     zassert_equal(feature_bits[ZMK_PTP_REPORT_ID_SELECTIVE], 8);
+}
+
+static int receive(uint16_t sequence, struct zmk_ptp_frame frame) {
+    struct zmk_ptp_split_frame wire;
+    zmk_ptp_split_encode(&wire, sequence, &frame);
+    return zmk_ptp_split_receive(0, &wire);
+}
+
+ZTEST(ptp, test_split_wire_validation) {
+    struct zmk_ptp_frame frame = one(3, 0x123, 0x456), decoded;
+    frame.buttons = 5;
+    struct zmk_ptp_split_frame wire;
+    zmk_ptp_split_encode(&wire, 0xfffe, &frame);
+    zassert_equal(sizeof(wire), 30);
+    const uint8_t expected[] = {0xfe, 0xff, 0xef, 0xbe, 0x29, 7, 0x23, 1, 0x56, 4};
+    zassert_mem_equal(wire.data, expected, sizeof(expected));
+    uint16_t sequence;
+    zassert_ok(zmk_ptp_split_decode(&wire, &sequence, &decoded));
+    zassert_equal(sequence, 0xfffe);
+    zassert_equal(decoded.contacts[0].x, frame.contacts[0].x);
+    zassert_equal(decoded.buttons, 5);
+    zassert_equal(zmk_ptp_split_receive(1, &wire), -ENODEV);
+    wire.data[4] |= 0x80;
+    zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
+    wire.data[4] = 7;
+    zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
+    wire.data[4] = 1;
+    wire.data[5] = 10; /* Out-of-range ID. */
+    zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
+    wire.data[5] = 1;
+    sys_put_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_X + 1, wire.data + 6);
+    zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
+}
+
+ZTEST(ptp, test_split_frames_wrap_heartbeat_and_lift) {
+    struct zmk_ptp_frame frame = one(0, 12, 34);
+    zassert_ok(receive(0xfffe, frame));
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 1);
+    zassert_ok(receive(0xfffe, frame)); /* Lease only, no duplicate HID report. */
+    zassert_equal(receive(0xfffd, frame), -ESTALE);
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 1);
+    frame.contacts[0].x = 56;
+    zassert_ok(receive(0xffff, frame));
+    zassert_ok(receive(0, (struct zmk_ptp_frame){.scan_time = 0}));
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 3);
+    zassert_equal(last().contacts[0].flags_id, ZMK_PTP_CONFIDENCE);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 56);
+}
+
+ZTEST(ptp, test_split_gap_cancels_before_id_reuse) {
+    zassert_ok(receive(1, one(0, 12, 34)));
+    k_sleep(K_MSEC(20));
+    zassert_ok(receive(3, one(0, 56, 78))); /* The intervening lift was lost. */
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 3);
+    zassert_equal(sent[1].report.contacts[0].flags_id, 0); /* Not a confident tap. */
+    zassert_equal(last().contacts[0].flags_id, ZMK_PTP_CONFIDENCE | ZMK_PTP_TIP);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 56);
+}
+
+ZTEST(ptp, test_split_disconnect_and_silent_link_cancel) {
+    struct zmk_ptp_frame frame = one(0, 12, 34);
+    frame.buttons = 7;
+    zassert_ok(receive(1, frame));
+    k_sleep(K_MSEC(20));
+    zmk_ptp_split_reset();
+    k_sleep(K_MSEC(20));
+    zassert_equal(last().contacts[0].flags_id, 0);
+    zassert_equal(last().count_buttons, 1);
+    zassert_ok(receive(1, frame)); /* A new session can restart its sequence. */
+    k_sleep(K_MSEC(340));
+    zassert_equal(sent_count, 4);
+    zassert_equal(last().contacts[0].flags_id, 0);
+    zassert_equal(last().count_buttons, 1);
+}
+
+ZTEST(ptp, test_split_backpressure_overflow_recovers_latest) {
+    zassert_ok(receive(1, one(0, 1, 2)));
+    k_sleep(K_MSEC(20));
+    usb_error = -EAGAIN;
+    for (int i = 2; i <= 25; i++) {
+        zassert_ok(receive(i, one(0, i, 2)));
+    }
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 1);
+    usb_error = 0;
+    k_sleep(K_MSEC(40));
+    zassert_equal(sent[1].report.contacts[0].flags_id, 0);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 25);
+    zassert_equal(last().contacts[0].flags_id, ZMK_PTP_CONFIDENCE | ZMK_PTP_TIP);
+}
+
+ZTEST(ptp, test_split_endpoint_change_discards_backlog) {
+    zassert_ok(receive(1, one(0, 1, 2)));
+    k_sleep(K_MSEC(20));
+    usb_error = -EAGAIN;
+    zassert_ok(receive(2, one(0, 25, 2)));
+    k_sleep(K_MSEC(20));
+    zmk_ptp_set_endpoint(ble1);
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 1);
+    zassert_ok(receive(2, one(0, 25, 2)));
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 2);
+    zassert_true(zmk_endpoint_instance_eq(sent[1].endpoint, ble1));
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 25);
+}
+
+ZTEST(ptp, test_split_host_reset_discards_backlog_not_other_hosts) {
+    zassert_ok(receive(1, one(0, 1, 2)));
+    k_sleep(K_MSEC(20));
+    usb_error = -EAGAIN;
+    zassert_ok(receive(2, one(0, 25, 2)));
+    k_sleep(K_MSEC(20));
+    zmk_ptp_reset_endpoint(ble1); /* Inactive host does not cancel the USB source. */
+    k_sleep(K_MSEC(20));
+    usb_error = 0;
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 2);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 25);
+
+    usb_error = -EAGAIN;
+    zassert_ok(receive(3, one(0, 99, 2)));
+    k_sleep(K_MSEC(20));
+    zmk_ptp_reset_endpoint(usb);
+    usb_error = 0;
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 2);
+    zassert_ok(receive(3, one(0, 99, 2))); /* Only a fresh complete observation returns. */
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 3);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 99);
+}
+
+ZTEST(ptp, test_wired_atomic_framing_and_length_validation) {
+    struct event_envelope env = {
+        .prefix.magic_prefix = ZMK_SPLIT_WIRED_ENVELOPE_MAGIC_PREFIX,
+        .prefix.payload_size =
+            offsetof(struct event_payload, event.data) + sizeof(struct zmk_ptp_split_frame),
+        .payload.event.type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_CONTACT_FRAME,
+    };
+    struct zmk_ptp_frame frame = one(4, 123, 456);
+    zmk_ptp_split_encode(&env.payload.event.data.contact_frame, 42, &frame);
+    zassert_true(zmk_split_wired_event_is_valid(&env));
+    const size_t wire_size = sizeof(env.prefix) + env.prefix.payload_size;
+    struct msg_postfix postfix = {.crc = crc32_ieee((const uint8_t *)&env, wire_size)};
+    RING_BUF_DECLARE(rx, 128);
+    struct event_envelope received = {0};
+    ring_buf_put(&rx, (const uint8_t *)&env, 3);
+    zassert_equal(zmk_split_wired_get_item(&rx, (uint8_t *)&received, sizeof(received)), -EAGAIN);
+    ring_buf_put(&rx, (const uint8_t *)&env + 3, wire_size - 3);
+    zassert_equal(zmk_split_wired_get_item(&rx, (uint8_t *)&received, sizeof(received)), -EAGAIN);
+    ring_buf_put(&rx, (const uint8_t *)&postfix, sizeof(postfix));
+    zassert_ok(zmk_split_wired_get_item(&rx, (uint8_t *)&received, sizeof(received)));
+    zassert_true(zmk_split_wired_event_is_valid(&received));
+    zassert_mem_equal(&received.payload.event.data.contact_frame,
+                      &env.payload.event.data.contact_frame, sizeof(struct zmk_ptp_split_frame));
+    received.prefix.payload_size--;
+    zassert_false(zmk_split_wired_event_is_valid(&received));
+
+    /* An oversized/unsupported packet must not wedge subsequent key/contact packets. */
+    struct msg_prefix oversized = {.magic_prefix = ZMK_SPLIT_WIRED_ENVELOPE_MAGIC_PREFIX,
+                                   .payload_size = 255};
+    ring_buf_put(&rx, (const uint8_t *)&oversized, sizeof(oversized));
+    ring_buf_put(&rx, (const uint8_t *)&env, wire_size);
+    ring_buf_put(&rx, (const uint8_t *)&postfix, sizeof(postfix));
+    zassert_ok(zmk_split_wired_get_item(&rx, (uint8_t *)&received, sizeof(received)));
+
+    postfix.crc++;
+    ring_buf_put(&rx, (const uint8_t *)&env, wire_size);
+    ring_buf_put(&rx, (const uint8_t *)&postfix, sizeof(postfix));
+    zassert_equal(zmk_split_wired_get_item(&rx, (uint8_t *)&received, sizeof(received)), -EINVAL);
 }
 
 ZTEST_SUITE(ptp, NULL, NULL, before, NULL, NULL);

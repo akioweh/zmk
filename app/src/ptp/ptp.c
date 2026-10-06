@@ -11,6 +11,10 @@
 #include <zephyr/sys/byteorder.h>
 #include <zmk/endpoints.h>
 #include <zmk/ptp/transport.h>
+#include <zmk/ptp/frame.h>
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+#include <zmk/ptp/split.h>
+#endif
 
 struct ptp_host {
     struct zmk_endpoint_instance endpoint;
@@ -30,6 +34,9 @@ static struct ptp_host hosts[ZMK_ENDPOINT_COUNT] = {
         },
 };
 static struct zmk_endpoint_instance selected;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+static atomic_t selected_index = -1;
+#endif
 static K_MUTEX_DEFINE(ptp_lock);
 ATOMIC_DEFINE(reset_pending, ZMK_ENDPOINT_COUNT);
 
@@ -37,10 +44,6 @@ static void recovery_work(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(recovery, recovery_work);
 
 BUILD_ASSERT(sizeof(struct zmk_ptp_report) == 5 * CONFIG_ZMK_TRACKPAD_FINGERS + 4);
-
-uint16_t zmk_ptp_scan_time(void) {
-    return (uint16_t)(k_ticks_to_us_floor64(k_uptime_ticks()) / 100);
-}
 
 static int host_index(struct zmk_endpoint_instance endpoint) {
     switch (endpoint.transport) {
@@ -176,21 +179,9 @@ static void recovery_work(struct k_work *work) {
 }
 
 int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) {
-    if (k_is_in_isr()) {
-        return -EWOULDBLOCK;
-    }
-    if (!frame || frame->contact_count > CONFIG_ZMK_TRACKPAD_FINGERS || (frame->buttons & ~7)) {
-        return -EINVAL;
-    }
-    uint8_t seen = 0;
-    for (int i = 0; i < frame->contact_count; i++) {
-        const struct zmk_ptp_contact *contact = &frame->contacts[i];
-        if (contact->id >= CONFIG_ZMK_TRACKPAD_FINGERS || (seen & BIT(contact->id)) ||
-            contact->x > CONFIG_ZMK_TRACKPAD_LOGICAL_X ||
-            contact->y > CONFIG_ZMK_TRACKPAD_LOGICAL_Y) {
-            return -EINVAL;
-        }
-        seen |= BIT(contact->id);
+    int validation = zmk_ptp_validate_frame(frame);
+    if (validation) {
+        return validation;
     }
     if (k_mutex_lock(&ptp_lock, K_NO_WAIT)) {
         return -EAGAIN;
@@ -209,7 +200,7 @@ int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) {
     return err;
 }
 
-int zmk_ptp_release(void) {
+static int release_selected(bool cancel) {
     if (k_is_in_isr()) {
         return -EWOULDBLOCK;
     }
@@ -217,13 +208,26 @@ int zmk_ptp_release(void) {
         return -EAGAIN;
     }
     int index = host_index(selected);
+    if (index >= 0) {
+        apply_reset(index);
+    }
+    if (cancel && index >= 0) {
+        for (int i = 0; i < CONFIG_ZMK_TRACKPAD_FINGERS; i++) {
+            hosts[index].contacts[i].confidence = false;
+        }
+    }
     int err = index >= 0 ? release(&hosts[index]) : 0;
     if (err) {
         k_work_reschedule(&recovery, K_MSEC(50));
     }
     k_mutex_unlock(&ptp_lock);
-    return err;
+    /* Cancellation owns deferred cleanup; the bridge need only retry contention. */
+    return cancel ? 0 : err;
 }
+
+int zmk_ptp_release(void) { return release_selected(false); }
+
+int zmk_ptp_cancel(void) { return release_selected(true); }
 
 void zmk_ptp_set_endpoint(struct zmk_endpoint_instance endpoint) {
     k_mutex_lock(&ptp_lock, K_FOREVER);
@@ -232,8 +236,14 @@ void zmk_ptp_set_endpoint(struct zmk_endpoint_instance endpoint) {
         if (old >= 0 && release(&hosts[old])) {
             k_work_reschedule(&recovery, K_MSEC(50));
         }
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        zmk_ptp_split_reset();
+#endif
         selected = endpoint;
         int index = host_index(endpoint);
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        atomic_set(&selected_index, index);
+#endif
         if (index >= 0) {
             hosts[index].endpoint = endpoint;
         }
@@ -245,6 +255,11 @@ void zmk_ptp_reset_endpoint(struct zmk_endpoint_instance endpoint) {
     int index = host_index(endpoint);
     if (index >= 0) {
         atomic_set_bit(reset_pending, index);
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        if (index == atomic_get(&selected_index)) {
+            zmk_ptp_split_reset();
+        }
+#endif
         k_work_reschedule(&recovery, K_NO_WAIT);
     }
 }

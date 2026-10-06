@@ -3,12 +3,13 @@
 
 menuconfig ZMK_TRACKPAD
     bool "Native multitouch touchpad (PTP)"
-    depends on !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
-    depends on ZMK_USB || ZMK_BLE
+    depends on ZMK_USB || ZMK_BLE || ZMK_SPLIT
+    select BT_GATT_AUTO_UPDATE_MTU if ZMK_SPLIT_ROLE_CENTRAL && ZMK_SPLIT_BLE
     help
       Enable native contact reporting over a separate USB HID interface and
       Bluetooth HID service. Drivers submit full snapshots via zmk/ptp.h.
-      This does not enable sensor drivers or split contact transport.
+      Split peripherals forward atomic contact frames via the existing split
+      transport. Enable this on both halves; it does not enable sensor drivers.
       Native touchpad mode only; no mouse-mode fallback or Windows certification.
 
 if ZMK_TRACKPAD
@@ -27,6 +28,29 @@ config ZMK_TRACKPAD_LOGICAL_Y
     int "Maximum Y coordinate"
     range 1 32767
     default 4095
+
+if ZMK_SPLIT
+
+config ZMK_TRACKPAD_SPLIT_QUEUE_SIZE
+    int "Maximum complete contact frames queued for split transport"
+    range 1 64
+    default 8
+
+if ZMK_SPLIT_ROLE_CENTRAL
+
+config ZMK_TRACKPAD_SPLIT_SOURCE
+    int "Split peripheral supplying the logical touchpad"
+    range 0 255
+    default 0
+    help
+      Existing split transport source ID. One logical touchpad is supported;
+      do not mix local and peripheral producers.
+
+endif
+
+endif
+
+if !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
 
 config ZMK_TRACKPAD_PHYSICAL_X
     int "Surface width in tenths of a millimeter"
@@ -68,4 +92,6 @@ config USB_REQUEST_BUFFER_SIZE
 
 endif
 
-endif
+endif # Host-facing configuration
+
+endif # ZMK_TRACKPAD

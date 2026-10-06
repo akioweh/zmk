@@ -279,24 +279,9 @@ static void begin_tx(void) {
 #endif
 }
 
-static ssize_t get_payload_data_size(const struct zmk_split_transport_peripheral_event *evt) {
-    switch (evt->type) {
-    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT:
-        return sizeof(evt->data.input_event);
-    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT:
-        return sizeof(evt->data.key_position_event);
-    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_SENSOR_EVENT:
-        return sizeof(evt->data.sensor_event);
-    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT:
-        return sizeof(evt->data.battery_event);
-    default:
-        return -ENOTSUP;
-    }
-}
-
 static int
 split_peripheral_wired_report_event(const struct zmk_split_transport_peripheral_event *event) {
-    ssize_t data_size = get_payload_data_size(event);
+    ssize_t data_size = zmk_split_wired_event_data_size(event);
     if (data_size < 0) {
         LOG_WRN("Failed to determine payload data size %d", data_size);
         return data_size;

@@ -27,6 +27,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/split/bluetooth/service.h>
 
 #include "peripheral.h"
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+#include <zmk/ptp/split.h>
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
 #include <zmk/events/hid_indicators_changed.h>
@@ -178,6 +181,14 @@ ssize_t bt_gatt_attr_read_input_split_cpf(struct bt_conn *conn, const struct bt_
 
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+static void contact_frame_ccc(const struct bt_gatt_attr *attr, uint16_t value) {
+    if (value == BT_GATT_CCC_NOTIFY) {
+        zmk_ptp_split_resume();
+    }
+}
+#endif
+
 BT_GATT_SERVICE_DEFINE(
     split_svc, BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_SERVICE_UUID)),
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CHAR_POSITION_STATE_UUID),
@@ -195,6 +206,11 @@ BT_GATT_SERVICE_DEFINE(
                            split_svc_sensor_state, NULL, &last_sensor_event),
     BT_GATT_CCC(split_svc_sensor_state_ccc, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
 #endif /* ZMK_KEYMAP_HAS_SENSORS */
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CONTACT_FRAME_UUID),
+                           BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_READ_ENCRYPT, NULL, NULL, NULL),
+    BT_GATT_CCC(contact_frame_ccc, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
+#endif
     DT_FOREACH_STATUS_OKAY(zmk_input_split, INPUT_SPLIT_CHARS)
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
         BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_HID_INDICATORS_UUID),
@@ -372,6 +388,76 @@ static int zmk_split_bt_report_input(uint8_t reg, uint8_t type, uint16_t code, i
 
 #endif /* IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT) */
 
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+
+BUILD_ASSERT(CONFIG_BT_L2CAP_TX_MTU >= ZMK_PTP_SPLIT_FRAME_SIZE + 3);
+BUILD_ASSERT(CONFIG_BT_BUF_ACL_RX_SIZE >= ZMK_PTP_SPLIT_FRAME_SIZE + 7);
+
+struct contact_notify_item {
+    struct bt_conn *conn;
+    struct zmk_ptp_split_frame frame;
+};
+K_MSGQ_DEFINE(contact_msgq, sizeof(struct contact_notify_item),
+              CONFIG_ZMK_TRACKPAD_SPLIT_QUEUE_SIZE, 4);
+
+static const struct bt_gatt_attr *contact_attr(void) {
+    return bt_gatt_find_by_uuid(split_svc.attrs, split_svc.attr_count,
+                                BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CONTACT_FRAME_UUID));
+}
+
+static void contact_notify(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(contact_notify_work, contact_notify);
+
+static void contact_notify(struct k_work *work) {
+    struct contact_notify_item item;
+    while (!k_msgq_peek(&contact_msgq, &item)) {
+        struct bt_gatt_notify_params params = {
+            .attr = contact_attr(),
+            .data = &item.frame,
+            .len = sizeof(item.frame),
+        };
+        int err = bt_gatt_notify_cb(item.conn, &params);
+        if (err == -ENOMEM || err == -EAGAIN || err == -ENOBUFS) {
+            k_work_schedule(&contact_notify_work, K_MSEC(5));
+            return;
+        }
+        k_msgq_get(&contact_msgq, &item, K_NO_WAIT);
+        bt_conn_unref(item.conn);
+    }
+}
+
+static void contact_conn(struct bt_conn *conn, void *data) {
+    struct bt_conn **found = data;
+    struct bt_conn_info info;
+    if (!*found && !bt_conn_get_info(conn, &info) && info.state == BT_CONN_STATE_CONNECTED) {
+        *found = bt_conn_ref(conn);
+    }
+}
+
+static int report_contact_frame(const struct zmk_ptp_split_frame *frame) {
+    struct contact_notify_item item = {.frame = *frame};
+    bt_conn_foreach(BT_CONN_TYPE_LE, contact_conn, &item.conn);
+    if (!item.conn) {
+        return -ENODEV;
+    }
+    int err = 0;
+    if (bt_conn_get_security(item.conn) < BT_SECURITY_L2 ||
+        !bt_gatt_is_subscribed(item.conn, contact_attr(), BT_GATT_CCC_NOTIFY)) {
+        err = -EACCES;
+    } else if (bt_gatt_get_mtu(item.conn) < sizeof(*frame) + 3) {
+        err = -EMSGSIZE;
+    } else {
+        err = k_msgq_put(&contact_msgq, &item, K_NO_WAIT);
+    }
+    if (err) {
+        bt_conn_unref(item.conn);
+    } else {
+        k_work_reschedule(&contact_notify_work, K_NO_WAIT);
+    }
+    return err;
+}
+#endif
+
 static int service_init(void) {
     static const struct k_work_queue_config queue_config = {
         .name = "Split Peripheral Notification Queue"};
@@ -386,6 +472,10 @@ SYS_INIT(service_init, APPLICATION, CONFIG_ZMK_BLE_INIT_PRIORITY);
 int zmk_split_transport_peripheral_bt_report_event(
     const struct zmk_split_transport_peripheral_event *ev) {
     switch (ev->type) {
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_CONTACT_FRAME:
+        return report_contact_frame(&ev->data.contact_frame);
+#endif
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT:
         if (ev->data.key_position_event.pressed) {
             zmk_split_bt_position_pressed(ev->data.key_position_event.position);

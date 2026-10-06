@@ -4,17 +4,19 @@ This fork ports the HID interface from [Pete Johanson's PTP prototype](https://g
 It exposes a separate USB HID interface and Bluetooth HID service using the same descriptor and report encoder.
 The target is native Linux touchpad input, not firmware-side gestures or Windows certification.
 
-**There is no raw-contact sensor adapter or split contact transport yet.** Existing mouse input listeners are unchanged. Enabling this feature alone does not make an Azoteq trackpad multitouch.
+**There is no raw-contact sensor adapter yet.** Split contact forwarding is implemented for the existing BLE and wired transports. Existing mouse input listeners are unchanged. Enabling this feature alone does not make an Azoteq trackpad multitouch.
 
 ## Configuration
 
-Set `CONFIG_ZMK_TRACKPAD=y` on the central/unibody firmware. Configure:
+Set `CONFIG_ZMK_TRACKPAD=y` on the central/unibody firmware, and on any peripheral supplying contacts. Use matching finger counts and logical coordinate ranges on both halves. Configure:
 
 - `CONFIG_ZMK_TRACKPAD_FINGERS`: 3–5 concurrent slots, default 5.
 - `CONFIG_ZMK_TRACKPAD_LOGICAL_X/Y`: maximum sensor coordinates (origin at the top left).
 - `CONFIG_ZMK_TRACKPAD_PHYSICAL_X/Y`: actual active surface size in 0.1 mm units. Defaults are placeholders, not calibration.
 - `CONFIG_ZMK_TRACKPAD_PAD_TYPE`: 0 clickpad, 1 pressure pad, 2 external buttons only (default).
-- `CONFIG_ZMK_BLE_PTP_REPORT_QUEUE_SIZE`: complete reports per Bluetooth profile, default 8.
+- `CONFIG_ZMK_BLE_PTP_REPORT_QUEUE_SIZE`: complete host reports per Bluetooth profile, default 8.
+- `CONFIG_ZMK_TRACKPAD_SPLIT_QUEUE_SIZE`: complete split frames per FIFO, default 8.
+- `CONFIG_ZMK_TRACKPAD_SPLIT_SOURCE`: central-side split source ID supplying the logical touchpad, default 0. One logical touchpad is supported; do not mix local and remote producers. Physical dimensions and pad type are host-side settings only.
 
 USB needs two HID interfaces and an interrupt packet large enough for the report; defaults are adjusted when enabled and incompatible overrides fail compilation. Keyboard boot protocol and existing mouse reporting remain separate.
 
@@ -37,9 +39,25 @@ int err = zmk_ptp_submit_frame(&frame);
 - Missing contacts produce explicit tip-up records at their last accepted coordinates, once. An empty snapshot lifts all fingers. Confidence stays false once a contact is classified as unintentional.
 - All contacts in a frame share its wrapping, 16-bit scan time in 100 µs units.
 - Button bits are integrated, external primary and external secondary. Do not synthesize taps/scrolling here; the Linux input stack supplies those gestures.
-- A zero return means USB accepted the packet or BLE accepted the complete report into its bounded queue, not that the host received it. Retry negative errors with a complete snapshot, preserving contact lifecycles. ISR calls are rejected.
+- A zero return means the local host/split transport accepted the complete frame, not that the central or host received it. Retry negative errors with a complete snapshot, preserving contact lifecycles. ISR calls are rejected.
 - USB failures do not advance accepted state. BLE backpressure never overwrites queued frames; notifications retry resource failures from system-workqueue context. Retained connection references prevent replay to another peer/session.
 - `zmk_ptp_release()` requests cleanup, with deferred retry for transport failures. Retry lock-contention errors yourself. Endpoint changes release the old destination and do not route that release to the newly selected profile. A suspended old BLE host cannot block another profile's queue.
+
+## Split forwarding
+
+The producer uses the same `zmk_ptp_submit_frame()` and `zmk_ptp_release()` API on either half. No sensor-specific adapter, scalar input listener or second split stack is involved:
+
+`producer → complete frame → existing split event routing → central core → USB/BLE host`
+
+A new contact-frame event extends `zmk_split_transport_peripheral_event`. Wired forwarding reuses its envelope, CRC and UART backends; the receiver validates typed payload lengths. BLE adds an encrypted notification characteristic to the existing split service. Each snapshot is one 30-byte value, independent of the configured 3–5 fingers: little-endian sequence/scan time, count/buttons, and five compact ID/confidence/X/Y records. No host HID report or host state is carried across the split.
+
+Split BLE needs ATT MTU **33 or greater**, including with three fingers. The central requests MTU negotiation automatically; sender admission returns `-EMSGSIZE` until ready. Notifications retain their original connection references and retry resource pressure, rather than replaying old queued frames into a new session. Both halves must run contact-capable firmware.
+
+Snapshots are copied, FIFO-queued and applied atomically. A 16-bit sequence detects missed frames and slot reuse across a lost lift. Queue overflow discards whole frames, cancels the previous lifetime with unconfident lifts, and recovers from the latest complete snapshot. Gaps/overflow can lose gestures; this is not an end-to-end reliable/acknowledged delivery protocol.
+
+A peripheral caches its latest validated **physical observation**, even if admission fails. Active snapshots send 50 ms heartbeats with the same sequence and timestamp; the central refreshes the lease without duplicate HID reports. Empty snapshots have two heartbeat attempts, then idle traffic stops. Disconnect, transport/host selection changes, or 300 ms without valid frames invalidate pending snapshots and cancel the old contacts/buttons. These are transport-health heartbeats, not sensor-health checks: a producer must call `zmk_ptp_release()` when it stops or loses its sensor.
+
+Thread contention still returns `-EAGAIN`; producers must handle that. Buffered forwarding retries host backpressure without partial frames. The lease/heartbeat timings need physical validation on slower transports; no throughput or Linux cancellation behavior is claimed from compilation.
 
 The host can read capabilities, an all-zero uncertified status blob, native input mode (3), and per-endpoint selective reporting. Surface/button switches are honored. Mouse input mode (0) is explicitly unsupported. USB reset/disconnection and BLE disconnection reset host state; BLE's HID control point honors suspend/resume. Cleanup reports do not wake an inactive USB host.
 
@@ -53,10 +71,15 @@ From an existing West workspace, replace `<zmk>` with the source checkout/worktr
 ZEPHYR_TOOLCHAIN_VARIANT=host west build <zmk>/app/tests/ptp \
   -d build/ptp-tests -b native_sim/native/64
 build/ptp-tests/zephyr/zephyr.exe
+
+ZEPHYR_TOOLCHAIN_VARIANT=host west build <zmk>/app/tests/ptp \
+  -d build/ptp-peripheral-tests -b native_sim/native/64 -- \
+  -DEXTRA_CONF_FILE=peripheral.conf
+build/ptp-peripheral-tests/zephyr/zephyr.exe
 ```
 
-These tests exercise real core state/encoding/workqueue behavior with mocked USB/BLE admission. They check contact lifecycles, descriptor lengths/units, malformed frames, backpressure, endpoint routing, selective reporting, suspend/reset and ISR rejection. They do not simulate radio delivery or host recognition.
+These tests exercise real core state/encoding/workqueue behavior with mocked USB/BLE admission. They check contact lifecycles, descriptor lengths/units, malformed frames, backpressure, endpoint routing, selective reporting, suspend/reset and ISR rejection, plus split encoding, sequence wrap/gaps, heartbeat/lease expiry, overflow recovery, offline lifts and fragmented/corrupt wired framing. They do not simulate radio delivery or host recognition.
 
-For a compile-only firmware check, add `-DEXTRA_CONF_FILE=<zmk>/app/tests/ptp/firmware.conf` to a central build. Its dimensions are synthetic; do not use them as sensor calibration. Normal firmware leaves PTP disabled.
+For a compile-only firmware check, add `-DEXTRA_CONF_FILE=<zmk>/app/tests/ptp/firmware.conf` to a central build, or `-DEXTRA_CONF_FILE=<zmk>/app/tests/ptp/peripheral-firmware.conf` to a peripheral build. Its dimensions are synthetic; do not use them as sensor calibration. Normal firmware leaves PTP disabled.
 
 Physical USB/Bluetooth enumeration, libinput behavior, radio throughput and disconnect/suspend races still require hardware validation once a contact producer is connected.

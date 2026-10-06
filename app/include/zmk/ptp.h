@@ -9,6 +9,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define ZMK_PTP_MAX_CONTACTS 5
+
 /** One active contact. IDs are stable slots in [0, CONFIG_ZMK_TRACKPAD_FINGERS). */
 struct zmk_ptp_contact {
     uint8_t id;
@@ -24,18 +26,21 @@ struct zmk_ptp_frame {
     uint8_t contact_count;
     /* Bits 0..2: integrated, external primary, external secondary buttons. */
     uint8_t buttons;
-    struct zmk_ptp_contact contacts[CONFIG_ZMK_TRACKPAD_FINGERS];
+    struct zmk_ptp_contact contacts[ZMK_PTP_MAX_CONTACTS];
 };
 
 /**
- * Submit one complete frame to the selected endpoint from thread context.
+ * Submit one complete frame from thread context, on either split role.
  *
- * The core copies the frame, preserves lift coordinates, and sends one whole
- * HID report. Returns 0 when the transport accepts it, or a negative errno.
- * On failure the previous accepted contact state is retained: retry with a
- * complete snapshot. -EAGAIN indicates contention or suspension; -ENODEV
- * indicates no endpoint, and BLE can return -EMSGSIZE until MTU negotiation.
- * Do not reuse an ID for a different contact until an accepted snapshot omits it.
+ * Central/unibody: send one HID report to the selected endpoint, preserving
+ * lift coordinates and previous accepted state on transport failure.
+ * Peripheral: copy and forward one contact event using the active split
+ * transport. The latest physical snapshot is cached/retried even offline;
+ * sequence gaps let the central cancel a lost contact lifetime.
+ * Returns 0 on local transport admission, not remote delivery acknowledgment.
+ * Retry negative errors with a complete snapshot. -EAGAIN indicates contention
+ * or suspension; -ENODEV indicates no endpoint/link; BLE can return -EMSGSIZE
+ * until MTU negotiation. Do not reuse an ID until an accepted snapshot omits it.
  */
 int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame);
 
