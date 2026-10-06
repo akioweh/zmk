@@ -106,6 +106,31 @@ ZTEST(ptp_peripheral, test_failed_admission_and_validation) {
     zassert_equal(count, accepted);
 }
 
+ZTEST(ptp_peripheral, test_retry_preserves_observation_sequence) {
+    struct zmk_ptp_frame frame = one();
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    uint16_t initial, retried;
+    last(&initial);
+    frame.scan_time++;
+    frame.contacts[0].x++;
+    error = -ENOSPC;
+    zassert_equal(zmk_ptp_submit_frame(&frame), -ENOSPC);
+    error = 0;
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    last(&retried);
+    zassert_equal(retried, (uint16_t)(initial + 1));
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    last(&initial);
+    zassert_equal(initial, retried);
+    frame.contact_count = 0;
+    error = -ENODEV;
+    zassert_equal(zmk_ptp_submit_frame(&frame), -ENODEV);
+    error = 0;
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    zassert_equal(last(&initial).contact_count, 0);
+    zassert_equal(initial, (uint16_t)(retried + 1));
+}
+
 static void from_isr(const void *unused) {
     struct zmk_ptp_frame frame = one();
     zassert_equal(zmk_ptp_submit_frame(&frame), -EWOULDBLOCK);

@@ -28,7 +28,14 @@ static int sent_count;
 static int usb_error;
 static int ble_error;
 
-int zmk_activity_note(void) { return 0; }
+static bool reset_during_submit;
+int zmk_activity_note(void) {
+    if (reset_during_submit) {
+        reset_during_submit = false;
+        zmk_ptp_split_reset();
+    }
+    return 0;
+}
 
 bool zmk_endpoint_instance_eq(struct zmk_endpoint_instance a, struct zmk_endpoint_instance b) {
     return a.transport == b.transport &&
@@ -73,6 +80,7 @@ static struct zmk_ptp_report last(void) {
 
 static void before(void *fixture) {
     usb_error = ble_error = 0;
+    reset_during_submit = false;
     zmk_ptp_split_reset();
     zmk_ptp_set_endpoint((struct zmk_endpoint_instance){0});
     zmk_ptp_reset_endpoint(usb);
@@ -392,6 +400,32 @@ ZTEST(ptp, test_split_frames_wrap_heartbeat_and_lift) {
     zassert_equal(sent_count, 3);
     zassert_equal(last().contacts[0].flags_id, ZMK_PTP_CONFIDENCE);
     zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 56);
+}
+
+ZTEST(ptp, test_split_invalidated_handoff_is_rejected) {
+    reset_during_submit = true;
+    zassert_ok(receive(1, one(0, 12, 34)));
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 0);
+    zassert_ok(receive(1, one(0, 56, 78)));
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 1);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 56);
+}
+
+ZTEST(ptp, test_cleanup_keeps_source_scan_clock) {
+    struct zmk_ptp_frame frame = one(0, 12, 34);
+    frame.scan_time = 0xfff0;
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    usb_error = -EAGAIN;
+    zassert_ok(zmk_ptp_cancel());
+    usb_error = 0;
+    k_sleep(K_MSEC(70));
+    zassert_equal(sys_le16_to_cpu(last().scan_time), 0xfff0);
+    frame.scan_time = 10; /* Genuine source-clock wrap is preserved. */
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    zmk_ptp_set_endpoint(ble1);
+    zassert_equal(sys_le16_to_cpu(last().scan_time), 10);
 }
 
 ZTEST(ptp, test_split_gap_cancels_before_id_reuse) {

@@ -47,6 +47,13 @@ void zmk_ptp_split_reset(void) {
     k_work_reschedule(&forward_work, K_NO_WAIT);
 }
 
+bool zmk_ptp_split_epoch_is_current(uint32_t expected) {
+    k_spinlock_key_t key = k_spin_lock(&lock);
+    bool current = epoch == expected;
+    k_spin_unlock(&lock, key);
+    return current;
+}
+
 int zmk_ptp_split_receive(uint8_t source, const struct zmk_ptp_split_frame *wire) {
     /* ponytail: one logical touchpad; separate HID collections if multiple pads are needed. */
     if (source != CONFIG_ZMK_TRACKPAD_SPLIT_SOURCE) {
@@ -128,7 +135,11 @@ static void forward(struct k_work *work) {
             }
             return;
         }
-        int err = zmk_ptp_submit_frame(&pending.frame);
+        int err = zmk_ptp_submit_split_frame(&pending.frame, pending.epoch);
+        if (err == -ESTALE) {
+            pending_valid = false;
+            continue;
+        }
         if (err) {
             int delay = (err == -ENODEV || err == -EMSGSIZE) ? HEARTBEAT_MS : 5;
             k_work_schedule(&forward_work, K_MSEC(delay));
@@ -169,8 +180,15 @@ int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) {
     }
     /* Cache physical observations even offline: never replay a held finger
      * after the producer has observed its lift. Failed admissions create gaps. */
+    /* Compare canonical wire bytes, not C structs with padding. A retry of
+     * the same observation retains its identity even after failed admission. */
+    struct zmk_ptp_split_frame previous, next;
+    zmk_ptp_split_encode(&previous, sequence, &latest);
+    zmk_ptp_split_encode(&next, sequence, frame);
+    if (!seen || memcmp(&previous, &next, sizeof(next))) {
+        sequence++;
+    }
     latest = *frame;
-    sequence++;
     seen = true;
     idle_retries = 2;
     err = send();

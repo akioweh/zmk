@@ -142,7 +142,9 @@ static int release(struct ptp_host *host) {
         host->release_pending = false;
         return 0;
     }
-    struct zmk_ptp_frame frame = {.scan_time = zmk_ptp_scan_time()};
+    /* Synthetic cleanup has no new sensor scan. Keep the last source clock,
+     * which may belong to a peripheral with an independent boot offset. */
+    struct zmk_ptp_frame frame = {.scan_time = sys_le16_to_cpu(host->report.scan_time)};
     int err = submit(host, &frame);
     host->release_pending = err != 0;
     return err;
@@ -178,7 +180,7 @@ static void recovery_work(struct k_work *work) {
     }
 }
 
-int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) {
+static int submit_frame(const struct zmk_ptp_frame *frame, const uint32_t *epoch) {
     int validation = zmk_ptp_validate_frame(frame);
     if (validation) {
         return validation;
@@ -187,6 +189,14 @@ int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) {
     if (k_mutex_lock(&ptp_lock, K_NO_WAIT)) {
         return -EAGAIN;
     }
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+    /* Admission linearizes here with endpoint changes. Already admitted
+     * transfers cannot be withdrawn; invalidated bridge handoffs are rejected. */
+    if (epoch && !zmk_ptp_split_epoch_is_current(*epoch)) {
+        k_mutex_unlock(&ptp_lock);
+        return -ESTALE;
+    }
+#endif
     int index = host_index(selected);
     int err = -ENODEV;
     if (index >= 0) {
@@ -200,6 +210,14 @@ int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) {
     k_mutex_unlock(&ptp_lock);
     return err;
 }
+
+int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame) { return submit_frame(frame, NULL); }
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+int zmk_ptp_submit_split_frame(const struct zmk_ptp_frame *frame, uint32_t epoch) {
+    return submit_frame(frame, &epoch);
+}
+#endif
 
 static int release_selected(bool cancel) {
     if (k_is_in_isr()) {
