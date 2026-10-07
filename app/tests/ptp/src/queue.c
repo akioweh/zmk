@@ -189,6 +189,8 @@ ZTEST(ptp_queue, test_motion_pace_and_transition_bypass) {
     zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 7500), period);
     zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period - 1, 7500), 1);
     zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period, 7500), 0);
+    zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period + 1, 7500), 0);
+    zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period + 100000, 7500), 0);
     zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 15000),
                   k_us_to_ticks_ceil64(15000 + CONFIG_ZMK_BLE_PTP_PACE_MARGIN_US));
     zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 0),
