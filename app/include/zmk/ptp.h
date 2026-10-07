@@ -48,5 +48,8 @@ int zmk_ptp_submit_frame(const struct zmk_ptp_frame *frame);
  */
 int zmk_ptp_release(void);
 
+/** Contact/button/confidence state, excluding coordinates and scan time. */
+uint16_t zmk_ptp_frame_state(const struct zmk_ptp_frame *frame);
+
 /** Convenience timestamp for drivers without a hardware scan clock. */
 uint16_t zmk_ptp_scan_time(void);

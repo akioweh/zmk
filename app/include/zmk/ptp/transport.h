@@ -49,6 +49,9 @@ int zmk_ptp_get_report(struct zmk_endpoint_instance endpoint, struct zmk_ptp_rep
 /* Feature data excludes the Report ID (USB adds it; HoG does not). */
 int zmk_ptp_get_feature(struct zmk_endpoint_instance endpoint, uint8_t id, uint8_t *data,
                         size_t size);
+/* BLE-only optional legacy-host padding; USB always uses the standard feature. */
+int zmk_ptp_get_ble_feature(struct zmk_endpoint_instance endpoint, uint8_t id, uint8_t *data,
+                            size_t size);
 int zmk_ptp_set_feature(struct zmk_endpoint_instance endpoint, uint8_t id, const uint8_t *data,
                         size_t size);
 

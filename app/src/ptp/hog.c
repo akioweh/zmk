@@ -15,6 +15,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zmk/ble.h>
 #include <zmk/ptp/queue.h>
+#include <zmk/ptp/pace.h>
 #include "hid.h"
 
 struct report_ref {
@@ -76,11 +77,11 @@ static ssize_t read_feature(struct bt_conn *conn, const struct bt_gatt_attr *att
                             uint16_t len, uint16_t offset) {
     const struct report_ref *ref = attr->user_data;
     struct zmk_endpoint_instance endpoint;
-    uint8_t data[256];
+    uint8_t data[257];
     if (connection_endpoint(conn, &endpoint)) {
         return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
     }
-    int size = zmk_ptp_get_feature(endpoint, ref->id, data, sizeof(data));
+    int size = zmk_ptp_get_ble_feature(endpoint, ref->id, data, sizeof(data));
     if (size < 0) {
         return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
     }
@@ -132,11 +133,8 @@ static ssize_t write_control(struct bt_conn *conn, const struct bt_gatt_attr *at
 
 static void ccc_changed(const struct bt_gatt_attr *attr, uint16_t value) {}
 
-#define FEATURE_RO(ref)                                                                            \
-    BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_REPORT, BT_GATT_CHRC_READ, BT_GATT_PERM_READ_ENCRYPT,      \
-                           read_feature, NULL, (void *)&ref),                                      \
-        BT_GATT_DESCRIPTOR(BT_UUID_HIDS_REPORT_REF, BT_GATT_PERM_READ_ENCRYPT, read_ref, NULL,     \
-                           (void *)&ref)
+/* HoGP Feature characteristics use Read + Write, never Write Without Response.
+ * Read-only PTP features reject writes in the producer API instead. */
 #define FEATURE_RW(ref)                                                                            \
     BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_REPORT, BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,            \
                            BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT, read_feature,   \
@@ -155,7 +153,7 @@ BT_GATT_SERVICE_DEFINE(
     BT_GATT_CCC(ccc_changed, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
     BT_GATT_DESCRIPTOR(BT_UUID_HIDS_REPORT_REF, BT_GATT_PERM_READ_ENCRYPT, read_ref, NULL,
                        (void *)&input_ref),
-    FEATURE_RO(capabilities_ref), FEATURE_RO(certification_ref), FEATURE_RW(mode_ref),
+    FEATURE_RW(capabilities_ref), FEATURE_RW(certification_ref), FEATURE_RW(mode_ref),
     FEATURE_RW(selective_ref),
     BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_CTRL_POINT, BT_GATT_CHRC_WRITE_WITHOUT_RESP,
                            BT_GATT_PERM_WRITE_ENCRYPT, NULL, write_control, NULL));
@@ -179,6 +177,8 @@ static uint32_t report_ticket;
 static struct bt_conn *last_conn[ZMK_BLE_PROFILE_COUNT];
 static uint16_t last_state[ZMK_BLE_PROFILE_COUNT];
 static bool report_seen[ZMK_BLE_PROFILE_COUNT];
+static bool pace_sent[ZMK_BLE_PROFILE_COUNT];
+static int64_t pace_last[ZMK_BLE_PROFILE_COUNT];
 
 static int connection_ready(struct bt_conn *conn) {
     struct bt_conn_info info;
@@ -195,12 +195,16 @@ static int connection_ready(struct bt_conn *conn) {
 }
 
 static void notify_work(struct k_work *work) {
-    bool retry = false;
+    k_ticks_t wait = 0;
     for (int profile = 0; profile < ZMK_BLE_PROFILE_COUNT; profile++) {
         struct queued_report entry, scratch;
         while (true) {
             k_spinlock_key_t key = k_spin_lock(&report_lock);
             bool ready = k_msgq_peek(&reports[profile], &entry) == 0;
+            bool motion =
+                ready && entry.header.motion && k_msgq_num_used_get(&reports[profile]) == 1;
+            bool sent = pace_sent[profile];
+            int64_t last = pace_last[profile];
             if (ready) {
                 bt_conn_ref(entry.conn);
             }
@@ -214,6 +218,17 @@ static void notify_work(struct k_work *work) {
                 break; /* Resume/disconnect will schedule us again. */
             }
             if (!err) {
+                struct bt_conn_info info;
+                uint32_t interval_us = !bt_conn_get_info(entry.conn, &info)
+                                           ? BT_CONN_INTERVAL_TO_US(info.le.interval)
+                                           : 0;
+                k_ticks_t due =
+                    zmk_ptp_pace_wait(motion, sent, last, k_uptime_ticks(), interval_us);
+                if (due) {
+                    bt_conn_unref(entry.conn);
+                    wait = wait ? MIN(wait, due) : due;
+                    break;
+                }
                 struct bt_gatt_notify_params params = {
                     .attr = &ptp_svc.attrs[PTP_INPUT_ATTR],
                     .data = (const uint8_t *)&entry.report + 1,
@@ -223,13 +238,18 @@ static void notify_work(struct k_work *work) {
                 err = bt_gatt_notify_cb(entry.conn, &params);
                 if (err && err != -ENOTCONN) {
                     bt_conn_unref(entry.conn);
-                    retry = true;
+                    k_ticks_t delay = k_ms_to_ticks_ceil32(5);
+                    wait = wait ? MIN(wait, delay) : delay;
                     break; /* Retain transitions, but allow pending motion to be refreshed. */
                 }
             }
             bt_conn_unref(entry.conn);
             /* Ended HID sessions are never replayed to a new peer. */
             key = k_spin_lock(&report_lock);
+            if (!err && last_conn[profile] == entry.conn && report_seen[profile]) {
+                pace_sent[profile] = true;
+                pace_last[profile] = k_uptime_ticks();
+            }
             bool removed = zmk_ptp_queue_get(&reports[profile], entry.header.ticket, &scratch);
             k_spin_unlock(&report_lock, key);
             if (removed) {
@@ -237,8 +257,9 @@ static void notify_work(struct k_work *work) {
             }
         }
     }
-    if (retry) {
-        k_work_reschedule(&notifier, K_MSEC(5));
+    if (wait) {
+        /* Do not postpone an earlier wake scheduled by a new transition. */
+        k_work_schedule(&notifier, K_TICKS(wait));
     }
 }
 
@@ -271,6 +292,9 @@ int zmk_ptp_hog_send_report(struct zmk_endpoint_instance endpoint,
     bool lift;
     uint16_t state = zmk_ptp_report_state(report, &lift);
     k_spinlock_key_t key = k_spin_lock(&report_lock);
+    if (last_conn[profile] != conn) {
+        pace_sent[profile] = false;
+    }
     entry.header = (struct zmk_ptp_queue_header){
         .ticket = ++report_ticket,
         .state = state,
@@ -300,6 +324,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
     for (int i = 0; i < ZMK_BLE_PROFILE_COUNT; i++) {
         if (last_conn[i] == conn) {
             report_seen[i] = false;
+            pace_sent[i] = false;
             last_conn[i] = NULL;
         }
     }

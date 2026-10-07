@@ -7,6 +7,8 @@
 #include <zmk/ptp/queue.h>
 #include <zmk/ptp/frame.h>
 #include <zmk/ptp/transport.h>
+#include <zmk/ptp/pace.h>
+#include "test_source.h"
 #include <zephyr/sys/byteorder.h>
 
 struct item {
@@ -176,6 +178,46 @@ ZTEST(ptp_queue, test_compact_lengths_and_sequence_coverage_wrap) {
     zassert_equal(zmk_ptp_split_unpack(&decoded, wire.data, 7), -EINVAL);
     wire.data[6] = 6;
     zassert_equal(zmk_ptp_split_unpack(&decoded, wire.data, 32), -EINVAL);
+}
+
+ZTEST(ptp_queue, test_motion_pace_and_transition_bypass) {
+    int64_t last = 100;
+    zassert_equal(zmk_ptp_pace_wait(false, true, last, last, 7500), 0);
+    zassert_equal(zmk_ptp_pace_wait(true, false, last, last, 7500), 0);
+#if IS_ENABLED(CONFIG_ZMK_BLE_PTP_PACING)
+    k_ticks_t period = k_us_to_ticks_ceil64(7500 + CONFIG_ZMK_BLE_PTP_PACE_MARGIN_US);
+    zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 7500), period);
+    zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period - 1, 7500), 1);
+    zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period, 7500), 0);
+    zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 15000),
+                  k_us_to_ticks_ceil64(15000 + CONFIG_ZMK_BLE_PTP_PACE_MARGIN_US));
+    zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 0),
+                  k_us_to_ticks_ceil64(CONFIG_ZMK_BLE_PTP_PACE_FALLBACK_US));
+#else
+    zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 7500), 0);
+#endif
+}
+
+ZTEST(ptp_queue, test_synthetic_strokes_and_lifetime_boundaries) {
+    for (uint32_t step = 0; step < 900; step++) {
+        struct zmk_ptp_frame f = zmk_ptp_test_frame(step);
+        zassert_ok(zmk_ptp_validate_frame(&f));
+        zassert_equal(f.scan_time, (uint16_t)(step * 100));
+        uint32_t phase = step % 450;
+        if (phase < 100) {
+            zassert_equal(f.contact_count, 1);
+            zassert_equal(f.contacts[0].y, CONFIG_ZMK_TRACKPAD_LOGICAL_Y / 2);
+        } else if (phase >= 150 && phase < 250) {
+            zassert_equal(f.contact_count, 1);
+            zassert_equal(f.contacts[0].x, CONFIG_ZMK_TRACKPAD_LOGICAL_X / 2);
+        } else if (phase >= 300 && phase < 400) {
+            zassert_equal(f.contact_count, 2);
+            zassert_equal(f.contacts[0].x + f.contacts[1].x, CONFIG_ZMK_TRACKPAD_LOGICAL_X);
+            zassert_equal(f.contacts[0].y + f.contacts[1].y, CONFIG_ZMK_TRACKPAD_LOGICAL_Y);
+        } else {
+            zassert_equal(f.contact_count, 0);
+        }
+    }
 }
 
 ZTEST_SUITE(ptp_queue, NULL, NULL, before, NULL, NULL);

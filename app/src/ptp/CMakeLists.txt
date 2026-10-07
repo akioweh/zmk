@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 target_sources(app PRIVATE frame.c)
+target_sources_ifdef(CONFIG_ZMK_PTP_TEST_SOURCE app PRIVATE test_source.c)
 target_sources_ifdef(CONFIG_ZMK_SPLIT app PRIVATE split.c)
 if ((NOT CONFIG_ZMK_SPLIT) OR CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
   target_sources(app PRIVATE ptp.c)

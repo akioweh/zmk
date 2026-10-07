@@ -18,7 +18,6 @@ struct zmk_ptp_split_frame {
 
 int zmk_ptp_validate_frame(const struct zmk_ptp_frame *frame);
 void zmk_ptp_note_activity(const struct zmk_ptp_frame *frame);
-uint16_t zmk_ptp_frame_state(const struct zmk_ptp_frame *frame);
 size_t zmk_ptp_split_size(const struct zmk_ptp_split_frame *wire);
 int zmk_ptp_split_unpack(struct zmk_ptp_split_frame *wire, const void *data, size_t length);
 void zmk_ptp_split_encode(struct zmk_ptp_split_frame *wire, uint16_t sequence,

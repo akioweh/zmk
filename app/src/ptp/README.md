@@ -15,6 +15,8 @@ Set `CONFIG_ZMK_TRACKPAD=y` on the central/unibody firmware, and on any peripher
 - `CONFIG_ZMK_TRACKPAD_PHYSICAL_X/Y`: actual active surface size in 0.1 mm units. Defaults are placeholders, not calibration.
 - `CONFIG_ZMK_TRACKPAD_PAD_TYPE`: 0 clickpad, 1 pressure pad, 2 external buttons only (default).
 - `CONFIG_ZMK_BLE_PTP_REPORT_QUEUE_SIZE`: queued transitions/latest motion per Bluetooth profile, default 4.
+- `CONFIG_ZMK_BLE_PTP_PACING`: enabled; isolated pending motion waits for the granted connection interval plus `CONFIG_ZMK_BLE_PTP_PACE_MARGIN_US` (500 µs). Without connection info, `CONFIG_ZMK_BLE_PTP_PACE_FALLBACK_US` is 10000 µs. Transitions, explicit lifts and motion preceding a transition bypass the gate. Only successful admission advances the deadline. This limits burst submissions, not actual radio arrival spacing after retries.
+- `CONFIG_ZMK_BLE_PTP_FEATURE_PAD_BYTE`: default off. Optional extra zero byte on BLE feature reads for the numbered GET_REPORT truncation in upstream BlueZ 5.87; prefer the upstream host fix (`dc2eb1394f4f`). USB and feature writes remain standard. Fixed hosts trim the extra byte to the requested report length; physical host interoperability still needs verification.
 - `CONFIG_ZMK_TRACKPAD_SPLIT_QUEUE_SIZE`: queued transitions/latest motion per split stage, default 4.
 - `CONFIG_ZMK_TRACKPAD_SPLIT_SOURCE`: central-side split source ID supplying the logical touchpad, default 0. One logical touchpad is supported; do not mix local and remote producers. Physical dimensions and pad type are host-side settings only.
 
@@ -42,6 +44,26 @@ int err = zmk_ptp_submit_frame(&frame);
 - A zero return means the local host/split transport accepted the complete frame, not that the central or host received it. Retry negative errors with a complete snapshot, preserving contact lifecycles. ISR calls are rejected.
 - USB failures do not advance accepted state. BLE queues replace obsolete pending motion within the same contact/button/confidence state, never transitions or explicit lifts. Notifications retry resource failures from system-workqueue context. Retained connection references prevent replay to another peer/session.
 - `zmk_ptp_release()` requests cleanup, with deferred retry for transport failures. Retry lock-contention errors yourself. Endpoint changes release the old destination and do not route that release to the newly selected profile. A suspended old BLE host cannot block another profile's queue.
+
+The shared USB/BLE descriptor fits the 512-byte GATT attribute limit, including
+five fingers; redundant zero physical minima are omitted without changing any
+report layout or range. A build assertion enforces the limit. Feature
+characteristics advertise Read + Write (not Write Without Response); read-only
+features reject writes.
+
+## Synthetic live source (diagnostic only)
+
+On a peripheral build, enable `CONFIG_ZMK_PTP_TEST_SOURCE=y` in an extra config.
+The local sensor module must exclude itself; the IQS5xx module does so automatically.
+After two seconds, an independent worker repeats known horizontal, vertical and
+two-contact diagonal strokes with 0.5-second lifts between them, targeting 10 ms
+samples. Rejected observations are retried intact. This exercises the real split,
+queue and selected-host HID path without finger/sensor uncertainty; clock/transport
+stalls may change its cadence. It generates pointer movement without touching the
+pad and prevents idle while active. Never enable it in normal firmware.
+
+The generator and pacing/feature compatibility checks run in the native suites;
+these are not live-radio measurements. Normal builds have no synthetic worker.
 
 ## Split forwarding
 

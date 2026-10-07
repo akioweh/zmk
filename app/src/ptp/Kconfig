@@ -29,6 +29,15 @@ config ZMK_TRACKPAD_LOGICAL_Y
     range 1 32767
     default 4095
 
+config ZMK_PTP_TEST_SOURCE
+    bool "Synthetic peripheral touchpad source (diagnostic only)"
+    depends on ZMK_SPLIT && !ZMK_SPLIT_ROLE_CENTRAL
+    help
+      Replace hardware sampling with repeating 100 Hz horizontal, vertical
+      and two-contact strokes separated by lifts. For live transport tests
+      only; never enable in normal firmware. Sensor modules must exclude
+      themselves when this is enabled.
+
 if ZMK_SPLIT
 
 config ZMK_TRACKPAD_SPLIT_QUEUE_SIZE
@@ -71,6 +80,36 @@ config ZMK_TRACKPAD_PAD_TYPE
     default 2
 
 if ZMK_BLE
+
+config ZMK_BLE_PTP_PACING
+    bool "Pace pending Bluetooth motion to the granted connection interval"
+    default y
+    help
+      Coalesce motion until the actual interval plus a small margin has
+      elapsed since the last successful admission. Transitions bypass the
+      gate. This reduces burst submissions, not guaranteed radio delivery
+      spacing; frames already admitted to Bluetooth cannot be withdrawn.
+
+config ZMK_BLE_PTP_PACE_MARGIN_US
+    int "Motion pacing margin (microseconds)"
+    depends on ZMK_BLE_PTP_PACING
+    range 0 10000
+    default 500
+
+config ZMK_BLE_PTP_PACE_FALLBACK_US
+    int "Motion pacing fallback without connection information (microseconds)"
+    depends on ZMK_BLE_PTP_PACING
+    range 1000 4000000
+    default 10000
+
+config ZMK_BLE_PTP_FEATURE_PAD_BYTE
+    bool "Pad BLE feature reads for legacy BlueZ GET_REPORT compatibility"
+    default n
+    help
+      Append a dummy byte to BLE feature reads. Upstream BlueZ 5.87 loses
+      the last byte of numbered GET_REPORT replies; fixed hosts trim the
+      extra byte to the requested report length. Prefer updating BlueZ;
+      enable only for an affected host. USB and feature writes are unchanged.
 
 config ZMK_BLE_PTP_REPORT_QUEUE_SIZE
     int "Maximum contact transitions/latest motion queued for Bluetooth"

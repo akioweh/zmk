@@ -41,8 +41,8 @@
         HID_USAGE_PAGE(HID_USAGE_GD), HID_USAGE(HID_USAGE_GD_X),                                   \
         HID_LOGICAL_MAX16(CONFIG_ZMK_TRACKPAD_LOGICAL_X & 0xff,                                    \
                           CONFIG_ZMK_TRACKPAD_LOGICAL_X >> 8),                                     \
-        PTP_PHYSICAL_MIN8(0), PTP_PHYSICAL_MAX16(CONFIG_ZMK_TRACKPAD_PHYSICAL_X), PTP_UNIT(0x11),  \
-        PTP_EXPONENT(0x0e), HID_REPORT_SIZE(16), HID_INPUT(PTP_DATA), HID_USAGE(HID_USAGE_GD_Y),   \
+        PTP_PHYSICAL_MAX16(CONFIG_ZMK_TRACKPAD_PHYSICAL_X), PTP_UNIT(0x11), PTP_EXPONENT(0x0e),    \
+        HID_REPORT_SIZE(16), HID_INPUT(PTP_DATA), HID_USAGE(HID_USAGE_GD_Y),                       \
         HID_LOGICAL_MAX16(CONFIG_ZMK_TRACKPAD_LOGICAL_Y & 0xff,                                    \
                           CONFIG_ZMK_TRACKPAD_LOGICAL_Y >> 8),                                     \
         PTP_PHYSICAL_MAX16(CONFIG_ZMK_TRACKPAD_PHYSICAL_Y), HID_INPUT(PTP_DATA),                   \
@@ -59,7 +59,6 @@ static const uint8_t zmk_ptp_hid_report_desc[] = {
     HID_USAGE(HID_USAGE_DIGITIZERS_SCAN_TIME),
     HID_LOGICAL_MIN8(0),
     HID_LOGICAL_MAX32(0xff, 0xff, 0, 0),
-    PTP_PHYSICAL_MIN8(0),
     PTP_PHYSICAL_MAX32(0xff, 0xff, 0, 0),
     PTP_UNIT_SECONDS,
     PTP_EXPONENT(0x0c),
@@ -70,7 +69,6 @@ static const uint8_t zmk_ptp_hid_report_desc[] = {
     /* Do not leak scan-time units/ranges into counts, buttons or features. */
     PTP_UNIT(0),
     PTP_EXPONENT(0),
-    PTP_PHYSICAL_MIN8(0),
     PTP_PHYSICAL_MAX8(0),
     HID_USAGE(HID_USAGE_DIGITIZERS_CONTACT_COUNT),
     HID_LOGICAL_MAX8(CONFIG_ZMK_TRACKPAD_FINGERS),
@@ -136,3 +134,6 @@ static const uint8_t zmk_ptp_hid_report_desc[] = {
     HID_END_COLLECTION,
     HID_END_COLLECTION,
 };
+
+/* Shared USB/BLE map: every inherited physical minimum is already zero. */
+BUILD_ASSERT(sizeof(zmk_ptp_hid_report_desc) <= 512, "PTP report map exceeds GATT attribute limit");

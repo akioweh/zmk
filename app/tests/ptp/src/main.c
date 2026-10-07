@@ -300,7 +300,9 @@ ZTEST(ptp, test_isr_calls_are_rejected) {
 }
 
 ZTEST(ptp, test_descriptor_matches_wire_layout_and_units) {
-    uint32_t size = 0, count = 0, id = 0, unit = 0;
+    zassert_true(sizeof(zmk_ptp_hid_report_desc) <= 512);
+    uint32_t size = 0, count = 0, id = 0, unit = 0, physical_min = 0, physical_max = 0;
+    uint32_t logical_max = 0, exponent = 0;
     uint32_t input_bits[9] = {0}, feature_bits[9] = {0};
     int xy_fields = 0, scan_fields = 0;
     for (size_t pos = 0; pos < sizeof(zmk_ptp_hid_report_desc);) {
@@ -327,13 +329,34 @@ ZTEST(ptp, test_descriptor_matches_wire_layout_and_units) {
             if (tag == 6) {
                 unit = value;
             }
+            if (tag == 2) {
+                logical_max = value;
+            }
+            if (tag == 3) {
+                physical_min = value;
+            }
+            if (tag == 4) {
+                physical_max = value;
+            }
+            if (tag == 5) {
+                exponent = value;
+            }
         } else if (type == 0 && (tag == 8 || tag == 11)) {
             zassert_true(id < ARRAY_SIZE(input_bits));
+            zassert_equal(physical_min, 0);
             if (tag == 8) {
                 input_bits[id] += size * count;
                 if (size == 16 && unit == 0x11) {
+                    zassert_equal(exponent, 0x0e);
+                    zassert_equal(logical_max, xy_fields % 2 ? CONFIG_ZMK_TRACKPAD_LOGICAL_Y
+                                                             : CONFIG_ZMK_TRACKPAD_LOGICAL_X);
+                    zassert_equal(physical_max, xy_fields % 2 ? CONFIG_ZMK_TRACKPAD_PHYSICAL_Y
+                                                              : CONFIG_ZMK_TRACKPAD_PHYSICAL_X);
                     xy_fields++;
                 } else if (size == 16 && unit == 0x1001) {
+                    zassert_equal(exponent, 0x0c);
+                    zassert_equal(logical_max, 65535);
+                    zassert_equal(physical_max, 65535);
                     scan_fields++;
                 } else {
                     zassert_equal(unit, 0);
@@ -351,6 +374,30 @@ ZTEST(ptp, test_descriptor_matches_wire_layout_and_units) {
     zassert_equal(feature_bits[ZMK_PTP_REPORT_ID_CERTIFICATION], 256 * 8);
     zassert_equal(feature_bits[ZMK_PTP_REPORT_ID_MODE], 8);
     zassert_equal(feature_bits[ZMK_PTP_REPORT_ID_SELECTIVE], 8);
+}
+
+ZTEST(ptp, test_ble_feature_padding_and_legacy_host_length) {
+    uint8_t usb_data[256], ble_data[257];
+    uint8_t ids[] = {ZMK_PTP_REPORT_ID_CAPABILITIES, ZMK_PTP_REPORT_ID_MODE,
+                     ZMK_PTP_REPORT_ID_SELECTIVE, ZMK_PTP_REPORT_ID_CERTIFICATION};
+    bool pad = IS_ENABLED(CONFIG_ZMK_BLE_PTP_FEATURE_PAD_BYTE);
+    for (int i = 0; i < ARRAY_SIZE(ids); i++) {
+        int len = zmk_ptp_get_feature(ble0, ids[i], usb_data, sizeof(usb_data));
+        zassert_true(len > 0);
+        int wire_len = zmk_ptp_get_ble_feature(ble0, ids[i], ble_data, sizeof(ble_data));
+        zassert_equal(wire_len, len + pad);
+        zassert_mem_equal(usb_data, ble_data, len);
+        if (pad) {
+            zassert_equal(ble_data[len], 0);
+            /* Legacy numbered GET replies lose one payload byte; fixed hosts
+             * trim to the requested length. Both preserve the full feature. */
+            zassert_equal(wire_len - 1, len);
+            zassert_equal(MIN(wire_len, len), len);
+        }
+        zassert_equal(zmk_ptp_get_ble_feature(ble0, ids[i], ble_data, len - 1 + pad), -EMSGSIZE);
+    }
+    zassert_equal(zmk_ptp_get_ble_feature(ble0, 0xff, ble_data, sizeof(ble_data)), -ENOTSUP);
+    zassert_equal(zmk_ptp_get_ble_feature(ble0, ZMK_PTP_REPORT_ID_MODE, ble_data, 0), -EMSGSIZE);
 }
 
 static int receive(uint16_t sequence, struct zmk_ptp_frame frame) {
