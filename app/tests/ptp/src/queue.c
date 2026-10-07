@@ -7,7 +7,7 @@
 #include <zmk/ptp/queue.h>
 #include <zmk/ptp/frame.h>
 #include <zmk/ptp/transport.h>
-#include <zmk/ptp/pace.h>
+#include "hog.h"
 #include "test_source.h"
 #include <zephyr/sys/byteorder.h>
 
@@ -159,25 +159,29 @@ ZTEST(ptp_queue, test_compact_lengths_and_sequence_coverage_wrap) {
             f.contacts[i] = (struct zmk_ptp_contact){.id = i, .confidence = true};
         }
         zmk_ptp_split_encode(&wire, 1, &f);
-        sys_put_le16(0xfffc, wire.data + 4);
+        wire.first_sequence = sys_cpu_to_le16(0xfffc);
         size_t size = 7 + 5 * n;
         zassert_equal(zmk_ptp_split_size(&wire), size);
-        zassert_ok(zmk_ptp_split_unpack(&decoded, wire.data, size));
+        zassert_ok(zmk_ptp_split_unpack(&decoded, &wire, size));
+        uint8_t packet[sizeof(wire) + 1] __aligned(2);
+        memcpy(packet + 1, &wire, size); /* Received ATT values need not be aligned. */
+        zassert_ok(zmk_ptp_split_unpack(&decoded, packet + 1, size));
+        zassert_mem_equal(&decoded, &wire, sizeof(wire));
         zassert_ok(zmk_ptp_split_decode(&decoded, &seq, &received));
         zassert_equal(received.contact_count, n);
-        zassert_equal(zmk_ptp_split_unpack(&decoded, wire.data, size - 1), -EINVAL);
+        zassert_equal(zmk_ptp_split_unpack(&decoded, &wire, size - 1), -EINVAL);
         if (n < 5) {
-            zassert_equal(zmk_ptp_split_unpack(&decoded, wire.data, size + 1), -EINVAL);
+            zassert_equal(zmk_ptp_split_unpack(&decoded, &wire, size + 1), -EINVAL);
         }
     }
     zassert_equal(zmk_ptp_split_unpack(&decoded, NULL, 7), -EINVAL);
-    zassert_equal(zmk_ptp_split_unpack(&decoded, wire.data, 33), -EINVAL);
-    sys_put_le16(2, wire.data + 4); /* Coverage cannot begin in the future. */
+    zassert_equal(zmk_ptp_split_unpack(&decoded, &wire, 33), -EINVAL);
+    wire.first_sequence = sys_cpu_to_le16(2); /* Coverage cannot begin in the future. */
     zassert_equal(zmk_ptp_split_decode(&wire, &seq, &received), -EINVAL);
-    wire.data[6] = 0x80;
-    zassert_equal(zmk_ptp_split_unpack(&decoded, wire.data, 7), -EINVAL);
-    wire.data[6] = 6;
-    zassert_equal(zmk_ptp_split_unpack(&decoded, wire.data, 32), -EINVAL);
+    wire.count_buttons = 0x80;
+    zassert_equal(zmk_ptp_split_unpack(&decoded, &wire, 7), -EINVAL);
+    wire.count_buttons = 6;
+    zassert_equal(zmk_ptp_split_unpack(&decoded, &wire, 32), -EINVAL);
 }
 
 ZTEST(ptp_queue, test_motion_pace_and_transition_bypass) {

@@ -13,6 +13,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zmk/endpoints.h>
 #include "hid.h"
+#include "hog.h"
 #include <zmk/ptp/split.h>
 #include <zmk/ptp/queue.h>
 #include <zephyr/sys/crc.h>
@@ -496,22 +497,22 @@ ZTEST(ptp, test_split_wire_validation) {
     zmk_ptp_split_encode(&wire, 0xfffe, &frame);
     zassert_equal(sizeof(wire), 32);
     const uint8_t expected[] = {0xfe, 0xff, 0xef, 0xbe, 0xfe, 0xff, 0x29, 7, 0x23, 1, 0x56, 4};
-    zassert_mem_equal(wire.data, expected, sizeof(expected));
+    zassert_mem_equal(&wire, expected, sizeof(expected));
     uint16_t sequence;
     zassert_ok(zmk_ptp_split_decode(&wire, &sequence, &decoded));
     zassert_equal(sequence, 0xfffe);
     zassert_equal(decoded.contacts[0].x, frame.contacts[0].x);
     zassert_equal(decoded.buttons, 5);
     zassert_equal(zmk_ptp_split_receive(1, &wire), -ENODEV);
-    wire.data[6] |= 0x80;
+    wire.count_buttons |= 0x80;
     zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
-    wire.data[6] = 7;
+    wire.count_buttons = 7;
     zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
-    wire.data[6] = 1;
-    wire.data[7] = 10; /* Out-of-range ID. */
+    wire.count_buttons = 1;
+    wire.contacts[0].id_confidence = 10; /* Out-of-range ID. */
     zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
-    wire.data[7] = 1;
-    sys_put_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_X + 1, wire.data + 8);
+    wire.contacts[0].id_confidence = 1;
+    wire.contacts[0].x = sys_cpu_to_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_X + 1);
     zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
 }
 
@@ -614,7 +615,7 @@ ZTEST(ptp, test_split_coalesced_range_and_heartbeat_preserve_lifetime) {
     frame.scan_time = 123;
     struct zmk_ptp_split_frame wire;
     zmk_ptp_split_encode(&wire, 3, &frame);
-    sys_put_le16(0xffff, wire.data + 4); /* Intentionally replaced motion, across wrap. */
+    wire.first_sequence = sys_cpu_to_le16(0xffff); /* Intentionally replaced motion, across wrap. */
     zassert_ok(zmk_ptp_split_receive(0, &wire));
     k_sleep(K_MSEC(20));
     zassert_equal(sent_count, 2);
@@ -634,7 +635,7 @@ ZTEST(ptp, test_split_coverage_cannot_hide_a_contact_transition) {
     struct zmk_ptp_frame frame = one(1, 3, 4);
     struct zmk_ptp_split_frame wire;
     zmk_ptp_split_encode(&wire, 9, &frame);
-    sys_put_le16(2, wire.data + 4);
+    wire.first_sequence = sys_cpu_to_le16(2);
     zassert_ok(zmk_ptp_split_receive(0, &wire));
     k_sleep(K_MSEC(20));
     zassert_equal(sent_count, 3);

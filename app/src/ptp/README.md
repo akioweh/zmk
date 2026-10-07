@@ -6,6 +6,31 @@ The target is native Linux touchpad input, not firmware-side gestures or Windows
 
 Sensor adapters belong in external ZMK modules and use the public producer API; this fork contains only the generic PTP infrastructure. Split contact forwarding uses the existing BLE and wired transports. Existing mouse input listeners are unchanged; remove any legacy listener/driver for the same touchpad to avoid duplicate pointer events.
 
+## Architecture
+
+```text
+sensor module → complete physical frame
+  peripheral: split codec → existing BLE/wired transport
+  central:    split receiver → host core → USB or Bluetooth HoG
+                                   └── optional touch input device → behaviors
+```
+
+- `ptp.h` is the sensor-facing API. Sensor I/O, decoding, calibration and device
+  power management stay outside the fork.
+- `frame.c` validates physical snapshots, tracks activity and encodes/decodes
+  compact split frames. `frame.h` declares their packed little-endian layout.
+- `split.c` owns sequence/coverage checks, heartbeat/lease recovery and buffered
+  forwarding. Existing split transports carry those frames, not host HID state.
+- `ptp.c` owns endpoint selection, accepted contact lifetimes, report encoding,
+  feature state and cleanup. Accepted state advances only after backend admission.
+- `hid.h` and `transport.h` share the USB/BLE descriptor and report format.
+  `usb.c` owns USB admission; `hog.c` owns each BLE profile's queue, connection
+  references, suspend state and pacing. BLE-only helpers live in `hog.h`.
+- `queue.h` shares the bounded lifecycle-preserving coalescing rule between stages;
+  each stage retains its own synchronization and connection ownership.
+- `touch.c` is an opt-in physical-touch bridge, not a second motion/gesture path.
+  `test_source.c` is diagnostic-only and submits through the normal producer API.
+
 ## Configuration
 
 Set `CONFIG_ZMK_TRACKPAD=y` on the central/unibody firmware, and on any peripheral supplying contacts. Use matching finger counts and logical coordinate ranges on both halves. Configure:

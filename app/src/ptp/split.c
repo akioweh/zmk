@@ -75,8 +75,9 @@ int zmk_ptp_split_receive(uint8_t source, const struct zmk_ptp_split_frame *wire
         int16_t delta = (int16_t)(next - sequence);
         if (!delta) {
             /* Coverage may differ between a coalesced packet and its heartbeat. */
-            err = (memcmp(wire->data, latest.data, 4) ||
-                   memcmp(wire->data + 6, latest.data + 6, sizeof(latest) - 6))
+            err = (wire->scan_time != latest.scan_time ||
+                   wire->count_buttons != latest.count_buttons ||
+                   memcmp(wire->contacts, latest.contacts, sizeof(latest.contacts)))
                       ? -EINVAL
                       : 0;
             if (!err) {
@@ -89,7 +90,7 @@ int zmk_ptp_split_receive(uint8_t source, const struct zmk_ptp_split_frame *wire
             k_spin_unlock(&lock, key);
             return -ESTALE;
         }
-        uint16_t covered = next - sys_get_le16(wire->data + 4);
+        uint16_t covered = next - sys_le16_to_cpu(wire->first_sequence);
         if (delta != 1 && (!motion || (uint16_t)(next - (sequence + 1)) > covered)) {
             reset();
             motion = false;

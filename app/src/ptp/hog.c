@@ -15,7 +15,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zmk/ble.h>
 #include <zmk/ptp/queue.h>
-#include <zmk/ptp/pace.h>
+#include "hog.h"
 #include "hid.h"
 
 struct report_ref {
@@ -29,8 +29,26 @@ static const struct report_ref capabilities_ref = {ZMK_PTP_REPORT_ID_CAPABILITIE
 static const struct report_ref certification_ref = {ZMK_PTP_REPORT_ID_CERTIFICATION, 3};
 static const struct report_ref mode_ref = {ZMK_PTP_REPORT_ID_MODE, 3};
 static const struct report_ref selective_ref = {ZMK_PTP_REPORT_ID_SELECTIVE, 3};
-static atomic_t suspended[ZMK_BLE_PROFILE_COUNT];
-static atomic_ptr_t bound_conns[ZMK_BLE_PROFILE_COUNT];
+struct queued_report {
+    struct zmk_ptp_queue_header header;
+    /* Owned reference: the original peer/session, not merely its profile slot. */
+    struct bt_conn *conn;
+    struct zmk_ptp_report report;
+};
+
+/* Each destination owns its queue and session/pacing state. A suspended old
+ * host must not block the newly selected host's reports. */
+struct ptp_hog_profile {
+    struct k_msgq reports;
+    char storage[CONFIG_ZMK_BLE_PTP_REPORT_QUEUE_SIZE * sizeof(struct queued_report)] __aligned(4);
+    atomic_t suspended;
+    atomic_ptr_t bound_conn;   /* Owned reference, independent of queued reports. */
+    struct bt_conn *last_conn; /* Borrowed; cleared by the disconnect callback. */
+    uint16_t last_state;
+    bool report_seen, pace_sent;
+    int64_t pace_last;
+};
+static struct ptp_hog_profile profiles[ZMK_BLE_PROFILE_COUNT];
 static void notify_work(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(notifier, notify_work);
 
@@ -124,7 +142,7 @@ static ssize_t write_control(struct bt_conn *conn, const struct bt_gatt_attr *at
     if (connection_endpoint(conn, &endpoint) || zmk_ptp_set_suspended(endpoint, value == 0)) {
         return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
     }
-    atomic_set(&suspended[endpoint.ble.profile_index], value == 0);
+    atomic_set(&profiles[endpoint.ble.profile_index].suspended, value == 0);
     if (value == 1) {
         k_work_reschedule(&notifier, K_NO_WAIT);
     }
@@ -161,24 +179,8 @@ BT_GATT_SERVICE_DEFINE(
 /* Value attribute, not the characteristic declaration; no conditional attrs precede it. */
 #define PTP_INPUT_ATTR 6
 
-struct queued_report {
-    struct zmk_ptp_queue_header header;
-    /* A retained connection reference pins the original peer/session, not just a profile slot. */
-    struct bt_conn *conn;
-    struct zmk_ptp_report report;
-};
-
-/* A suspended old host must not block the newly selected host's reports. */
-static struct k_msgq reports[ZMK_BLE_PROFILE_COUNT];
-static char report_buffers[ZMK_BLE_PROFILE_COUNT][CONFIG_ZMK_BLE_PTP_REPORT_QUEUE_SIZE *
-                                                  sizeof(struct queued_report)] __aligned(4);
 static struct k_spinlock report_lock;
 static uint32_t report_ticket;
-static struct bt_conn *last_conn[ZMK_BLE_PROFILE_COUNT];
-static uint16_t last_state[ZMK_BLE_PROFILE_COUNT];
-static bool report_seen[ZMK_BLE_PROFILE_COUNT];
-static bool pace_sent[ZMK_BLE_PROFILE_COUNT];
-static int64_t pace_last[ZMK_BLE_PROFILE_COUNT];
 
 static int connection_ready(struct bt_conn *conn) {
     struct bt_conn_info info;
@@ -200,11 +202,11 @@ static void notify_work(struct k_work *work) {
         struct queued_report entry, scratch;
         while (true) {
             k_spinlock_key_t key = k_spin_lock(&report_lock);
-            bool ready = k_msgq_peek(&reports[profile], &entry) == 0;
-            bool motion =
-                ready && entry.header.motion && k_msgq_num_used_get(&reports[profile]) == 1;
-            bool sent = pace_sent[profile];
-            int64_t last = pace_last[profile];
+            bool ready = k_msgq_peek(&profiles[profile].reports, &entry) == 0;
+            bool motion = ready && entry.header.motion &&
+                          k_msgq_num_used_get(&profiles[profile].reports) == 1;
+            bool sent = profiles[profile].pace_sent;
+            int64_t last = profiles[profile].pace_last;
             if (ready) {
                 bt_conn_ref(entry.conn);
             }
@@ -213,7 +215,7 @@ static void notify_work(struct k_work *work) {
                 break;
             }
             int err = connection_ready(entry.conn);
-            if (!err && atomic_get(&suspended[profile])) {
+            if (!err && atomic_get(&profiles[profile].suspended)) {
                 bt_conn_unref(entry.conn);
                 break; /* Resume/disconnect will schedule us again. */
             }
@@ -246,11 +248,13 @@ static void notify_work(struct k_work *work) {
             bt_conn_unref(entry.conn);
             /* Ended HID sessions are never replayed to a new peer. */
             key = k_spin_lock(&report_lock);
-            if (!err && last_conn[profile] == entry.conn && report_seen[profile]) {
-                pace_sent[profile] = true;
-                pace_last[profile] = k_uptime_ticks();
+            if (!err && profiles[profile].last_conn == entry.conn &&
+                profiles[profile].report_seen) {
+                profiles[profile].pace_sent = true;
+                profiles[profile].pace_last = k_uptime_ticks();
             }
-            bool removed = zmk_ptp_queue_get(&reports[profile], entry.header.ticket, &scratch);
+            bool removed =
+                zmk_ptp_queue_get(&profiles[profile].reports, entry.header.ticket, &scratch);
             k_spin_unlock(&report_lock, key);
             if (removed) {
                 bt_conn_unref(scratch.conn);
@@ -273,7 +277,7 @@ int zmk_ptp_hog_send_report(struct zmk_endpoint_instance endpoint,
     if (!conn) {
         return -ENODEV;
     }
-    struct bt_conn *old = atomic_ptr_set(&bound_conns[profile], bt_conn_ref(conn));
+    struct bt_conn *old = atomic_ptr_set(&profiles[profile].bound_conn, bt_conn_ref(conn));
     if (old) {
         if (old != conn) {
             zmk_ptp_reset_endpoint(endpoint);
@@ -282,7 +286,7 @@ int zmk_ptp_hog_send_report(struct zmk_endpoint_instance endpoint,
     }
     int err = connection_ready(conn);
     if (err) {
-        if (atomic_ptr_cas(&bound_conns[profile], conn, NULL)) {
+        if (atomic_ptr_cas(&profiles[profile].bound_conn, conn, NULL)) {
             bt_conn_unref(conn);
         }
         bt_conn_unref(conn);
@@ -292,20 +296,20 @@ int zmk_ptp_hog_send_report(struct zmk_endpoint_instance endpoint,
     bool lift;
     uint16_t state = zmk_ptp_report_state(report, &lift);
     k_spinlock_key_t key = k_spin_lock(&report_lock);
-    if (last_conn[profile] != conn) {
-        pace_sent[profile] = false;
+    if (profiles[profile].last_conn != conn) {
+        profiles[profile].pace_sent = false;
     }
     entry.header = (struct zmk_ptp_queue_header){
         .ticket = ++report_ticket,
         .state = state,
-        .motion = !lift && report_seen[profile] && last_conn[profile] == conn &&
-                  last_state[profile] == state,
+        .motion = !lift && profiles[profile].report_seen && profiles[profile].last_conn == conn &&
+                  profiles[profile].last_state == state,
     };
-    err = zmk_ptp_queue_put(&reports[profile], &entry, &scratch);
+    err = zmk_ptp_queue_put(&profiles[profile].reports, &entry, &scratch);
     if (err >= 0) {
-        report_seen[profile] = true;
-        last_conn[profile] = conn;
-        last_state[profile] = state;
+        profiles[profile].report_seen = true;
+        profiles[profile].last_conn = conn;
+        profiles[profile].last_state = state;
     }
     k_spin_unlock(&report_lock, key);
     if (err < 0) {
@@ -322,22 +326,22 @@ int zmk_ptp_hog_send_report(struct zmk_endpoint_instance endpoint,
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
     k_spinlock_key_t key = k_spin_lock(&report_lock);
     for (int i = 0; i < ZMK_BLE_PROFILE_COUNT; i++) {
-        if (last_conn[i] == conn) {
-            report_seen[i] = false;
-            pace_sent[i] = false;
-            last_conn[i] = NULL;
+        if (profiles[i].last_conn == conn) {
+            profiles[i].report_seen = false;
+            profiles[i].pace_sent = false;
+            profiles[i].last_conn = NULL;
         }
     }
     k_spin_unlock(&report_lock, key);
     int profile = zmk_ble_profile_index(bt_conn_get_dst(conn));
     if (profile >= 0 && profile < ZMK_BLE_PROFILE_COUNT) {
-        atomic_clear(&suspended[profile]);
+        atomic_clear(&profiles[profile].suspended);
         zmk_ptp_reset_endpoint((struct zmk_endpoint_instance){.transport = ZMK_TRANSPORT_BLE,
                                                               .ble.profile_index = profile});
     }
     for (int i = 0; i < ZMK_BLE_PROFILE_COUNT; i++) {
-        if (atomic_ptr_cas(&bound_conns[i], conn, NULL)) {
-            atomic_clear(&suspended[i]);
+        if (atomic_ptr_cas(&profiles[i].bound_conn, conn, NULL)) {
+            atomic_clear(&profiles[i].suspended);
             zmk_ptp_reset_endpoint((struct zmk_endpoint_instance){.transport = ZMK_TRANSPORT_BLE,
                                                                   .ble.profile_index = i});
             bt_conn_unref(conn);
@@ -350,7 +354,7 @@ BT_CONN_CB_DEFINE(ptp_conn_callbacks) = {.disconnected = disconnected};
 
 static int ptp_hog_init(void) {
     for (int i = 0; i < ZMK_BLE_PROFILE_COUNT; i++) {
-        k_msgq_init(&reports[i], report_buffers[i], sizeof(struct queued_report),
+        k_msgq_init(&profiles[i].reports, profiles[i].storage, sizeof(struct queued_report),
                     CONFIG_ZMK_BLE_PTP_REPORT_QUEUE_SIZE);
     }
     return 0;

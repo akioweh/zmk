@@ -427,12 +427,12 @@ static void contact_notify(struct k_work *work) {
         if (!ready) {
             return;
         }
-        uint16_t sequence = sys_get_le16(item.frame.data);
+        uint16_t sequence = sys_le16_to_cpu(item.frame.sequence);
         uint16_t first = item.header.first_sequence;
         if ((uint16_t)(sequence - first) > INT16_MAX) {
             first = sequence; /* A very long stall must recover via cancellation, not wrap. */
         }
-        sys_put_le16(first, item.frame.data + 4);
+        item.frame.first_sequence = sys_cpu_to_le16(first);
         struct bt_gatt_notify_params params = {
             .attr = contact_attr(),
             .data = &item.frame,

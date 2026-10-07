@@ -354,19 +354,6 @@ int zmk_ptp_get_feature(struct zmk_endpoint_instance endpoint, uint8_t id, uint8
     return err;
 }
 
-int zmk_ptp_get_ble_feature(struct zmk_endpoint_instance endpoint, uint8_t id, uint8_t *data,
-                            size_t size) {
-    bool pad = IS_ENABLED(CONFIG_ZMK_BLE_PTP_FEATURE_PAD_BYTE);
-    if (!size && pad) {
-        return -EMSGSIZE;
-    }
-    int len = zmk_ptp_get_feature(endpoint, id, data, size - pad);
-    if (len >= 0 && pad) {
-        data[len++] = 0;
-    }
-    return len;
-}
-
 int zmk_ptp_set_feature(struct zmk_endpoint_instance endpoint, uint8_t id, const uint8_t *data,
                         size_t size) {
     int index = host_index(endpoint);

@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 #include <zephyr/toolchain.h>
+#include <zephyr/sys/util.h>
 #include <zmk/endpoints_types.h>
 #include <zmk/ptp.h>
 
@@ -39,7 +40,23 @@ struct zmk_ptp_report {
 } __packed;
 
 /* Stable contact/button state for queue coalescing; explicit lifts are barriers. */
-uint16_t zmk_ptp_report_state(const struct zmk_ptp_report *report, bool *lift);
+static inline uint16_t zmk_ptp_report_state(const struct zmk_ptp_report *report, bool *lift) {
+    uint16_t state = (report->count_buttons >> 4) << (2 * ZMK_PTP_MAX_CONTACTS);
+    *lift = false;
+    for (int i = 0; i < (report->count_buttons & 0x0f); i++) {
+        uint8_t flags = report->contacts[i].flags_id;
+        if (!(flags & ZMK_PTP_TIP)) {
+            *lift = true;
+            continue;
+        }
+        uint8_t id = flags >> 2;
+        state |= BIT(id);
+        if (flags & ZMK_PTP_CONFIDENCE) {
+            state |= BIT(id + ZMK_PTP_MAX_CONTACTS);
+        }
+    }
+    return state;
+}
 
 /* Core lifecycle hooks and HID backend helpers, not the driver interface. */
 void zmk_ptp_set_endpoint(struct zmk_endpoint_instance endpoint);
@@ -49,9 +66,6 @@ int zmk_ptp_get_report(struct zmk_endpoint_instance endpoint, struct zmk_ptp_rep
 /* Feature data excludes the Report ID (USB adds it; HoG does not). */
 int zmk_ptp_get_feature(struct zmk_endpoint_instance endpoint, uint8_t id, uint8_t *data,
                         size_t size);
-/* BLE-only optional legacy-host padding; USB always uses the standard feature. */
-int zmk_ptp_get_ble_feature(struct zmk_endpoint_instance endpoint, uint8_t id, uint8_t *data,
-                            size_t size);
 int zmk_ptp_set_feature(struct zmk_endpoint_instance endpoint, uint8_t id, const uint8_t *data,
                         size_t size);
 
