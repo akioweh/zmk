@@ -61,6 +61,16 @@ endif
 
 if !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
 
+config ZMK_PTP_TOUCH
+    bool "PTP touch-state input bridge"
+    default y
+    depends on ZMK_POINTING && DT_HAS_ZMK_PTP_TOUCH_ENABLED
+    help
+      Emit INPUT_BTN_TOUCH press/release transitions for confident contacts
+      through an enabled zmk,ptp-touch device. Use an input listener and
+      behavior processor to bind touch state to a momentary layer.
+      Motion and buttons remain exclusively on the native PTP path.
+
 config ZMK_TRACKPAD_PHYSICAL_X
     int "Surface width in tenths of a millimeter"
     range 1 32767

@@ -12,6 +12,7 @@
 #include <zmk/endpoints.h>
 #include <zmk/ptp/transport.h>
 #include <zmk/ptp/frame.h>
+#include "touch.h"
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
 #include <zmk/ptp/split.h>
 #endif
@@ -197,6 +198,7 @@ static int submit_frame(const struct zmk_ptp_frame *frame, const uint32_t *epoch
         return -ESTALE;
     }
 #endif
+    zmk_ptp_touch_update(frame);
     int index = host_index(selected);
     int err = -ENODEV;
     if (index >= 0) {
@@ -226,6 +228,7 @@ static int release_selected(bool cancel) {
     if (k_mutex_lock(&ptp_lock, K_NO_WAIT)) {
         return -EAGAIN;
     }
+    zmk_ptp_touch_update(NULL);
     int index = host_index(selected);
     if (index >= 0) {
         apply_reset(index);

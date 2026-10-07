@@ -1,0 +1,5 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: Native PTP confident-contact touch-state input device
+compatible: "zmk,ptp-touch"

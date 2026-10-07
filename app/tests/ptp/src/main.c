@@ -9,6 +9,8 @@
 #include <zephyr/irq_offload.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
+#include <zephyr/input/input.h>
+#include <zephyr/sys/atomic.h>
 #include <zmk/endpoints.h>
 #include "hid.h"
 #include <zmk/ptp/split.h>
@@ -28,6 +30,24 @@ static struct {
 static int sent_count;
 static int usb_error;
 static int ble_error;
+
+static atomic_t observed_touch;
+static atomic_t touch_events;
+static atomic_t block_touch_input;
+K_SEM_DEFINE(touch_input_entered, 0, 1);
+K_SEM_DEFINE(touch_input_resume, 0, 1);
+static void touch_callback(struct input_event *event, void *user_data) {
+    zassert_equal(event->type, INPUT_EV_KEY);
+    zassert_equal(event->code, INPUT_BTN_TOUCH);
+    zassert_true(event->sync);
+    if (atomic_get(&block_touch_input)) {
+        k_sem_give(&touch_input_entered);
+        k_sem_take(&touch_input_resume, K_FOREVER);
+    }
+    atomic_set(&observed_touch, event->value);
+    atomic_inc(&touch_events);
+}
+INPUT_CALLBACK_DEFINE(DEVICE_DT_GET(DT_NODELABEL(ptp_touch_test)), touch_callback, NULL);
 
 static bool reset_during_submit;
 int zmk_activity_note(void) {
@@ -93,6 +113,69 @@ static void before(void *fixture) {
     k_sleep(K_MSEC(20));
     sent_count = 0;
     zmk_ptp_set_endpoint(usb);
+}
+
+ZTEST(ptp, test_observation_independent_of_host_admission) {
+    struct zmk_ptp_frame frame = one(0, 100, 200);
+    usb_error = -EAGAIN;
+    zassert_equal(zmk_ptp_submit_frame(&frame), -EAGAIN);
+    k_sleep(K_MSEC(20));
+    zassert_true(atomic_get(&observed_touch));
+    frame.contact_count = 0;
+    zassert_equal(zmk_ptp_submit_frame(&frame), -EAGAIN);
+    k_sleep(K_MSEC(20));
+    zassert_false(atomic_get(&observed_touch));
+    frame.contact_count = 1;
+    zmk_ptp_submit_frame(&frame);
+    k_sleep(K_MSEC(20));
+    zassert_true(atomic_get(&observed_touch));
+    zassert_ok(zmk_ptp_cancel());
+    k_sleep(K_MSEC(20));
+    zassert_false(atomic_get(&observed_touch));
+}
+
+ZTEST(ptp, test_touch_bridge_filters_palms_buttons_and_duplicate_motion) {
+    struct zmk_ptp_frame frame = one(0, 100, 200);
+    frame.contacts[0].confidence = false;
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    k_sleep(K_MSEC(20));
+    zassert_false(atomic_get(&observed_touch));
+    frame.contact_count = 0;
+    frame.buttons = 7;
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    k_sleep(K_MSEC(20));
+    zassert_false(atomic_get(&observed_touch));
+    frame = one(1, 100, 200);
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    k_sleep(K_MSEC(20));
+    zassert_true(atomic_get(&observed_touch));
+    atomic_val_t events = atomic_get(&touch_events);
+    frame.contacts[0].x++;
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    k_sleep(K_MSEC(20));
+    zassert_equal(atomic_get(&touch_events), events);
+    frame.contact_count = 0;
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    k_sleep(K_MSEC(20));
+    zassert_false(atomic_get(&observed_touch));
+}
+
+ZTEST(ptp, test_touch_release_retries_input_queue_backpressure) {
+    struct zmk_ptp_frame frame = one(0, 100, 200);
+    atomic_set(&block_touch_input, 1);
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    zassert_ok(k_sem_take(&touch_input_entered, K_MSEC(100)));
+    const struct device *device = DEVICE_DT_GET(DT_NODELABEL(ptp_touch_test));
+    for (int i = 0; i < CONFIG_INPUT_QUEUE_MAX_MSGS; i++) {
+        zassert_ok(input_report_key(device, INPUT_BTN_TOUCH, true, true, K_NO_WAIT));
+    }
+    frame.contact_count = 0;
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    k_sleep(K_MSEC(20)); /* The worker must retry the release, not discard it. */
+    atomic_set(&block_touch_input, 0);
+    k_sem_give(&touch_input_resume);
+    k_sleep(K_MSEC(30));
+    zassert_false(atomic_get(&observed_touch));
 }
 
 ZTEST(ptp, test_encoding_and_lifts) {
@@ -496,8 +579,12 @@ ZTEST(ptp, test_split_disconnect_and_silent_link_cancel) {
     k_sleep(K_MSEC(20));
     zassert_equal(last().contacts[0].flags_id, 0);
     zassert_equal(last().count_buttons, 1);
+    zassert_false(atomic_get(&observed_touch));
     zassert_ok(receive(1, frame)); /* A new session can restart its sequence. */
-    k_sleep(K_MSEC(340));
+    k_sleep(K_MSEC(20));
+    zassert_true(atomic_get(&observed_touch));
+    k_sleep(K_MSEC(320));
+    zassert_false(atomic_get(&observed_touch));
     zassert_equal(sent_count, 4);
     zassert_equal(last().contacts[0].flags_id, 0);
     zassert_equal(last().count_buttons, 1);

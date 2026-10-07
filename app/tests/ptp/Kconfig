@@ -20,6 +20,11 @@ config ZMK_SPLIT_ROLE_CENTRAL
     bool "Split central test variant"
     default y
 
+config ZMK_POINTING
+    bool
+    default y if ZMK_SPLIT_ROLE_CENTRAL
+    select INPUT
+
 config ZMK_TRACKPAD_PHYSICAL_X
     default 500
 

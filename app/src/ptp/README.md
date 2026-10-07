@@ -51,6 +51,26 @@ report layout or range. A build assertion enforces the limit. Feature
 characteristics advertise Read + Write (not Write Without Response); read-only
 features reject writes.
 
+## Touch-state behavior bridge
+
+An enabled `zmk,ptp-touch` devicetree node opts a central/unibody into
+`CONFIG_ZMK_PTP_TOUCH` when pointing support is enabled. One logical touchpad
+is supported. This virtual input device emits `INPUT_BTN_TOUCH` press/release
+transitions while any confident contact is present, independently of host HID
+admission. Buttons and motion never enter this input path.
+
+Connect the device to a standard `zmk,input-listener` with a
+`zmk,input-processor-behaviors` processor using `codes = <INPUT_BTN_TOUCH>`
+and a `bindings = <&mo YOUR_LAYER>` binding. The processor consumes the touch
+event rather than generating a legacy mouse click. Sensor adapters and the
+public producer API are unchanged.
+
+Input reporting is deferred outside the PTP lock. Queue backpressure retries
+the latest physical state, including releases; short intermediate states may
+coalesce while work is pending. Release/cancellation and split lease expiry clear
+touch state; host-only report cleanup is not a physical lift. With no enabled
+node the bridge is not built and the core touch update is a no-op.
+
 ## Synthetic live source (diagnostic only)
 
 On a peripheral build, enable `CONFIG_ZMK_PTP_TEST_SOURCE=y` in an extra config.
