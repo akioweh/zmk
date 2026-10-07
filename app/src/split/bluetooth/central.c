@@ -286,14 +286,16 @@ static uint8_t contact_frame_notify(struct bt_conn *conn, struct bt_gatt_subscri
         return BT_GATT_ITER_STOP;
     }
     int source = peripheral_slot_index_for_conn(conn);
-    if (source < 0 || length != sizeof(struct zmk_ptp_split_frame)) {
+    if (source < 0) {
         return BT_GATT_ITER_CONTINUE;
     }
     struct zmk_split_transport_peripheral_event event = {
         .type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_CONTACT_FRAME,
     };
-    memcpy(&event.data.contact_frame, data, length);
-    /* The contact bridge has its own complete-frame FIFO. Do not crowd the
+    if (zmk_ptp_split_unpack(&event.data.contact_frame, data, length)) {
+        return BT_GATT_ITER_CONTINUE;
+    }
+    /* The contact bridge has its own complete-frame queue. Do not crowd the
      * key-position queue or leave source IDs queued across reconnection. */
     dispatch_contact_frame(source, event);
     return BT_GATT_ITER_CONTINUE;

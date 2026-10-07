@@ -14,6 +14,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 #include <zmk/ble.h>
+#include <zmk/ptp/queue.h>
 #include "hid.h"
 
 struct report_ref {
@@ -163,6 +164,7 @@ BT_GATT_SERVICE_DEFINE(
 #define PTP_INPUT_ATTR 6
 
 struct queued_report {
+    struct zmk_ptp_queue_header header;
     /* A retained connection reference pins the original peer/session, not just a profile slot. */
     struct bt_conn *conn;
     struct zmk_ptp_report report;
@@ -172,6 +174,11 @@ struct queued_report {
 static struct k_msgq reports[ZMK_BLE_PROFILE_COUNT];
 static char report_buffers[ZMK_BLE_PROFILE_COUNT][CONFIG_ZMK_BLE_PTP_REPORT_QUEUE_SIZE *
                                                   sizeof(struct queued_report)] __aligned(4);
+static struct k_spinlock report_lock;
+static uint32_t report_ticket;
+static struct bt_conn *last_conn[ZMK_BLE_PROFILE_COUNT];
+static uint16_t last_state[ZMK_BLE_PROFILE_COUNT];
+static bool report_seen[ZMK_BLE_PROFILE_COUNT];
 
 static int connection_ready(struct bt_conn *conn) {
     struct bt_conn_info info;
@@ -190,10 +197,20 @@ static int connection_ready(struct bt_conn *conn) {
 static void notify_work(struct k_work *work) {
     bool retry = false;
     for (int profile = 0; profile < ZMK_BLE_PROFILE_COUNT; profile++) {
-        struct queued_report entry;
-        while (!k_msgq_peek(&reports[profile], &entry)) {
+        struct queued_report entry, scratch;
+        while (true) {
+            k_spinlock_key_t key = k_spin_lock(&report_lock);
+            bool ready = k_msgq_peek(&reports[profile], &entry) == 0;
+            if (ready) {
+                bt_conn_ref(entry.conn);
+            }
+            k_spin_unlock(&report_lock, key);
+            if (!ready) {
+                break;
+            }
             int err = connection_ready(entry.conn);
             if (!err && atomic_get(&suspended[profile])) {
+                bt_conn_unref(entry.conn);
                 break; /* Resume/disconnect will schedule us again. */
             }
             if (!err) {
@@ -205,13 +222,19 @@ static void notify_work(struct k_work *work) {
                 /* System workqueue context makes resource exhaustion non-blocking. */
                 err = bt_gatt_notify_cb(entry.conn, &params);
                 if (err && err != -ENOTCONN) {
+                    bt_conn_unref(entry.conn);
                     retry = true;
-                    break; /* Retain the complete frame, including any lift. */
+                    break; /* Retain transitions, but allow pending motion to be refreshed. */
                 }
             }
-            /* Ended HID sessions are never replayed to a new peer. */
-            k_msgq_get(&reports[profile], &entry, K_NO_WAIT);
             bt_conn_unref(entry.conn);
+            /* Ended HID sessions are never replayed to a new peer. */
+            key = k_spin_lock(&report_lock);
+            bool removed = zmk_ptp_queue_get(&reports[profile], entry.header.ticket, &scratch);
+            k_spin_unlock(&report_lock, key);
+            if (removed) {
+                bt_conn_unref(scratch.conn);
+            }
         }
     }
     if (retry) {
@@ -244,17 +267,43 @@ int zmk_ptp_hog_send_report(struct zmk_endpoint_instance endpoint,
         bt_conn_unref(conn);
         return err;
     }
-    struct queued_report entry = {.conn = conn, .report = *report};
-    err = k_msgq_put(&reports[profile], &entry, K_NO_WAIT);
-    if (err) {
+    struct queued_report entry = {.conn = conn, .report = *report}, scratch;
+    bool lift;
+    uint16_t state = zmk_ptp_report_state(report, &lift);
+    k_spinlock_key_t key = k_spin_lock(&report_lock);
+    entry.header = (struct zmk_ptp_queue_header){
+        .ticket = ++report_ticket,
+        .state = state,
+        .motion = !lift && report_seen[profile] && last_conn[profile] == conn &&
+                  last_state[profile] == state,
+    };
+    err = zmk_ptp_queue_put(&reports[profile], &entry, &scratch);
+    if (err >= 0) {
+        report_seen[profile] = true;
+        last_conn[profile] = conn;
+        last_state[profile] = state;
+    }
+    k_spin_unlock(&report_lock, key);
+    if (err < 0) {
         bt_conn_unref(conn);
-        return -EAGAIN; /* Backpressure, never overwrite an older frame. */
+        return -EAGAIN; /* Transition backpressure never overwrites a lifecycle boundary. */
+    }
+    if (err == 1) {
+        bt_conn_unref(scratch.conn);
     }
     k_work_reschedule(&notifier, K_NO_WAIT);
     return 0;
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
+    k_spinlock_key_t key = k_spin_lock(&report_lock);
+    for (int i = 0; i < ZMK_BLE_PROFILE_COUNT; i++) {
+        if (last_conn[i] == conn) {
+            report_seen[i] = false;
+            last_conn[i] = NULL;
+        }
+    }
+    k_spin_unlock(&report_lock, key);
     int profile = zmk_ble_profile_index(bt_conn_get_dst(conn));
     if (profile >= 0 && profile < ZMK_BLE_PROFILE_COUNT) {
         atomic_clear(&suspended[profile]);

@@ -12,6 +12,7 @@
 #include <zmk/endpoints.h>
 #include "hid.h"
 #include <zmk/ptp/split.h>
+#include <zmk/ptp/queue.h>
 #include <zephyr/sys/crc.h>
 #include "../../../src/split/wired/wired.h"
 
@@ -363,8 +364,8 @@ ZTEST(ptp, test_split_wire_validation) {
     frame.buttons = 5;
     struct zmk_ptp_split_frame wire;
     zmk_ptp_split_encode(&wire, 0xfffe, &frame);
-    zassert_equal(sizeof(wire), 30);
-    const uint8_t expected[] = {0xfe, 0xff, 0xef, 0xbe, 0x29, 7, 0x23, 1, 0x56, 4};
+    zassert_equal(sizeof(wire), 32);
+    const uint8_t expected[] = {0xfe, 0xff, 0xef, 0xbe, 0xfe, 0xff, 0x29, 7, 0x23, 1, 0x56, 4};
     zassert_mem_equal(wire.data, expected, sizeof(expected));
     uint16_t sequence;
     zassert_ok(zmk_ptp_split_decode(&wire, &sequence, &decoded));
@@ -372,15 +373,15 @@ ZTEST(ptp, test_split_wire_validation) {
     zassert_equal(decoded.contacts[0].x, frame.contacts[0].x);
     zassert_equal(decoded.buttons, 5);
     zassert_equal(zmk_ptp_split_receive(1, &wire), -ENODEV);
-    wire.data[4] |= 0x80;
+    wire.data[6] |= 0x80;
     zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
-    wire.data[4] = 7;
+    wire.data[6] = 7;
     zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
-    wire.data[4] = 1;
-    wire.data[5] = 10; /* Out-of-range ID. */
+    wire.data[6] = 1;
+    wire.data[7] = 10; /* Out-of-range ID. */
     zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
-    wire.data[5] = 1;
-    sys_put_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_X + 1, wire.data + 6);
+    wire.data[7] = 1;
+    sys_put_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_X + 1, wire.data + 8);
     zassert_equal(zmk_ptp_split_decode(&wire, &sequence, &decoded), -EINVAL);
 }
 
@@ -455,7 +456,7 @@ ZTEST(ptp, test_split_disconnect_and_silent_link_cancel) {
     zassert_equal(last().count_buttons, 1);
 }
 
-ZTEST(ptp, test_split_backpressure_overflow_recovers_latest) {
+ZTEST(ptp, test_split_backpressure_keeps_latest_motion_without_cancellation) {
     zassert_ok(receive(1, one(0, 1, 2)));
     k_sleep(K_MSEC(20));
     usb_error = -EAGAIN;
@@ -466,6 +467,76 @@ ZTEST(ptp, test_split_backpressure_overflow_recovers_latest) {
     zassert_equal(sent_count, 1);
     usb_error = 0;
     k_sleep(K_MSEC(40));
+    zassert_equal(sent_count, 2);
+    zassert_equal(sent[1].report.contacts[0].flags_id, ZMK_PTP_CONFIDENCE | ZMK_PTP_TIP);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 25);
+}
+
+ZTEST(ptp, test_split_coalesced_range_and_heartbeat_preserve_lifetime) {
+    struct zmk_ptp_frame frame = one(0, 1, 2);
+    zassert_ok(receive(0xfffe, frame));
+    k_sleep(K_MSEC(20));
+    frame.contacts[0].x = 99;
+    frame.scan_time = 123;
+    struct zmk_ptp_split_frame wire;
+    zmk_ptp_split_encode(&wire, 3, &frame);
+    sys_put_le16(0xffff, wire.data + 4); /* Intentionally replaced motion, across wrap. */
+    zassert_ok(zmk_ptp_split_receive(0, &wire));
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 2);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 99);
+    zmk_ptp_split_encode(&wire, 3, &frame); /* Heartbeat has narrower coverage. */
+    zassert_ok(zmk_ptp_split_receive(0, &wire));
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 2);
+    zassert_ok(receive(4, (struct zmk_ptp_frame){.scan_time = 124}));
+    k_sleep(K_MSEC(20));
+    zassert_equal(last().contacts[0].flags_id, ZMK_PTP_CONFIDENCE);
+}
+
+ZTEST(ptp, test_split_coverage_cannot_hide_a_contact_transition) {
+    zassert_ok(receive(1, one(0, 1, 2)));
+    k_sleep(K_MSEC(20));
+    struct zmk_ptp_frame frame = one(1, 3, 4);
+    struct zmk_ptp_split_frame wire;
+    zmk_ptp_split_encode(&wire, 9, &frame);
+    sys_put_le16(2, wire.data + 4);
+    zassert_ok(zmk_ptp_split_receive(0, &wire));
+    k_sleep(K_MSEC(20));
+    zassert_equal(sent_count, 3);
+    zassert_equal(sent[1].report.contacts[0].flags_id, 0);
+    zassert_equal(last().contacts[0].flags_id, (1 << 2) | ZMK_PTP_CONFIDENCE | ZMK_PTP_TIP);
+}
+
+ZTEST(ptp, test_split_blocked_birth_lift_and_retouch_are_not_overwritten) {
+    usb_error = -EAGAIN;
+    zassert_ok(receive(1, one(0, 10, 2)));
+    for (int i = 2; i <= 50; i++) {
+        zassert_ok(receive(i, one(0, i, 2)));
+    }
+    zassert_ok(receive(51, (struct zmk_ptp_frame){0}));
+    zassert_ok(receive(52, one(0, 100, 2)));
+    usb_error = 0;
+    k_sleep(K_MSEC(40));
+    zassert_equal(sent_count, 4);
+    zassert_equal(sys_le16_to_cpu(sent[0].report.contacts[0].x), 10);
+    zassert_equal(sys_le16_to_cpu(sent[1].report.contacts[0].x), 50);
+    zassert_equal(sent[2].report.contacts[0].flags_id, ZMK_PTP_CONFIDENCE);
+    zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 100);
+}
+
+ZTEST(ptp, test_split_transition_overflow_still_cancels_and_recovers) {
+    zassert_ok(receive(1, one(0, 1, 2)));
+    k_sleep(K_MSEC(20));
+    usb_error = -EAGAIN;
+    for (int i = 2; i <= 25; i++) {
+        struct zmk_ptp_frame frame = one(0, i, 2);
+        frame.buttons = i & 1; /* Every entry is a boundary, not replaceable motion. */
+        zassert_ok(receive(i, frame));
+    }
+    k_sleep(K_MSEC(20));
+    usb_error = 0;
+    k_sleep(K_MSEC(70));
     zassert_equal(sent[1].report.contacts[0].flags_id, 0);
     zassert_equal(sys_le16_to_cpu(last().contacts[0].x), 25);
     zassert_equal(last().contacts[0].flags_id, ZMK_PTP_CONFIDENCE | ZMK_PTP_TIP);

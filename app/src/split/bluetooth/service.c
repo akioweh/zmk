@@ -29,6 +29,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include "peripheral.h"
 #if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
 #include <zmk/ptp/split.h>
+#include <zmk/ptp/queue.h>
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
@@ -394,11 +395,17 @@ BUILD_ASSERT(CONFIG_BT_L2CAP_TX_MTU >= ZMK_PTP_SPLIT_FRAME_SIZE + 3);
 BUILD_ASSERT(CONFIG_BT_BUF_ACL_RX_SIZE >= ZMK_PTP_SPLIT_FRAME_SIZE + 7);
 
 struct contact_notify_item {
+    struct zmk_ptp_queue_header header;
     struct bt_conn *conn;
     struct zmk_ptp_split_frame frame;
 };
 K_MSGQ_DEFINE(contact_msgq, sizeof(struct contact_notify_item),
               CONFIG_ZMK_TRACKPAD_SPLIT_QUEUE_SIZE, 4);
+static struct k_spinlock contact_lock;
+static uint32_t contact_ticket;
+static struct bt_conn *contact_last_conn;
+static uint16_t contact_last_state, contact_last_sequence;
+static bool contact_seen;
 
 static const struct bt_gatt_attr *contact_attr(void) {
     return bt_gatt_find_by_uuid(split_svc.attrs, split_svc.attr_count,
@@ -409,22 +416,54 @@ static void contact_notify(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(contact_notify_work, contact_notify);
 
 static void contact_notify(struct k_work *work) {
-    struct contact_notify_item item;
-    while (!k_msgq_peek(&contact_msgq, &item)) {
+    struct contact_notify_item item, scratch;
+    while (true) {
+        k_spinlock_key_t key = k_spin_lock(&contact_lock);
+        bool ready = k_msgq_peek(&contact_msgq, &item) == 0;
+        if (ready) {
+            bt_conn_ref(item.conn); /* Own the unlocked copy, even if the head is replaced. */
+        }
+        k_spin_unlock(&contact_lock, key);
+        if (!ready) {
+            return;
+        }
+        uint16_t sequence = sys_get_le16(item.frame.data);
+        uint16_t first = item.header.first_sequence;
+        if ((uint16_t)(sequence - first) > INT16_MAX) {
+            first = sequence; /* A very long stall must recover via cancellation, not wrap. */
+        }
+        sys_put_le16(first, item.frame.data + 4);
         struct bt_gatt_notify_params params = {
             .attr = contact_attr(),
             .data = &item.frame,
-            .len = sizeof(item.frame),
+            .len = zmk_ptp_split_size(&item.frame),
         };
         int err = bt_gatt_notify_cb(item.conn, &params);
+        bt_conn_unref(item.conn);
         if (err == -ENOMEM || err == -EAGAIN || err == -ENOBUFS) {
             k_work_schedule(&contact_notify_work, K_MSEC(5));
             return;
         }
-        k_msgq_get(&contact_msgq, &item, K_NO_WAIT);
-        bt_conn_unref(item.conn);
+        key = k_spin_lock(&contact_lock);
+        bool removed = zmk_ptp_queue_get(&contact_msgq, item.header.ticket, &scratch);
+        k_spin_unlock(&contact_lock, key);
+        if (removed) {
+            bt_conn_unref(scratch.conn);
+        }
     }
 }
+
+static void contact_disconnected(struct bt_conn *conn, uint8_t reason) {
+    k_spinlock_key_t key = k_spin_lock(&contact_lock);
+    if (contact_last_conn == conn) {
+        contact_seen = false;
+        contact_last_conn = NULL;
+    }
+    k_spin_unlock(&contact_lock, key);
+    k_work_reschedule(&contact_notify_work, K_NO_WAIT);
+}
+
+BT_CONN_CB_DEFINE(contact_callbacks) = {.disconnected = contact_disconnected};
 
 static void contact_conn(struct bt_conn *conn, void *data) {
     struct bt_conn **found = data;
@@ -435,7 +474,13 @@ static void contact_conn(struct bt_conn *conn, void *data) {
 }
 
 static int report_contact_frame(const struct zmk_ptp_split_frame *frame) {
-    struct contact_notify_item item = {.frame = *frame};
+    struct zmk_ptp_frame decoded;
+    uint16_t sequence;
+    int validation = zmk_ptp_split_decode(frame, &sequence, &decoded);
+    if (validation) {
+        return validation;
+    }
+    struct contact_notify_item item = {.frame = *frame}, scratch;
     bt_conn_foreach(BT_CONN_TYPE_LE, contact_conn, &item.conn);
     if (!item.conn) {
         return -ENODEV;
@@ -444,10 +489,34 @@ static int report_contact_frame(const struct zmk_ptp_split_frame *frame) {
     if (bt_conn_get_security(item.conn) < BT_SECURITY_L2 ||
         !bt_gatt_is_subscribed(item.conn, contact_attr(), BT_GATT_CCC_NOTIFY)) {
         err = -EACCES;
-    } else if (bt_gatt_get_mtu(item.conn) < sizeof(*frame) + 3) {
+    } else if (bt_gatt_get_mtu(item.conn) < zmk_ptp_split_size(frame) + 3) {
         err = -EMSGSIZE;
     } else {
-        err = k_msgq_put(&contact_msgq, &item, K_NO_WAIT);
+        uint16_t state = zmk_ptp_frame_state(&decoded);
+        k_spinlock_key_t key = k_spin_lock(&contact_lock);
+        item.header = (struct zmk_ptp_queue_header){
+            .ticket = ++contact_ticket,
+            .state = state,
+            .first_sequence = sequence,
+            .sequence = sequence,
+            .motion = contact_seen && contact_last_conn == item.conn &&
+                      contact_last_state == state &&
+                      (uint16_t)(sequence - contact_last_sequence) <= 1,
+        };
+        err = zmk_ptp_queue_put(&contact_msgq, &item, &scratch);
+        if (err >= 0) {
+            contact_seen = true;
+            contact_last_conn = item.conn;
+            contact_last_state = state;
+            contact_last_sequence = sequence;
+        }
+        k_spin_unlock(&contact_lock, key);
+        if (err == 1) {
+            bt_conn_unref(scratch.conn);
+        }
+        if (err >= 0) {
+            err = 0;
+        }
     }
     if (err) {
         bt_conn_unref(item.conn);

@@ -7,6 +7,8 @@
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zmk/ptp/split.h>
+#include <zmk/ptp/queue.h>
+#include <zephyr/sys/byteorder.h>
 
 /* A lease detects a lost final lift, including wired links without detect GPIO.
  * Only active snapshots need continuous heartbeats; idle snapshots get two retries. */
@@ -16,6 +18,7 @@
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 
 struct queued_frame {
+    struct zmk_ptp_queue_header header;
     struct zmk_ptp_frame frame;
     uint32_t epoch;
 };
@@ -26,8 +29,8 @@ static uint16_t sequence;
 static bool sequence_valid, cancel_pending;
 static int64_t expires;
 static struct zmk_ptp_split_frame latest;
-static struct queued_frame pending;
-static bool pending_valid;
+static uint32_t ticket;
+static uint16_t latest_state;
 static void forward(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(forward_work, forward);
 
@@ -59,17 +62,23 @@ int zmk_ptp_split_receive(uint8_t source, const struct zmk_ptp_split_frame *wire
     if (source != CONFIG_ZMK_TRACKPAD_SPLIT_SOURCE) {
         return -ENODEV;
     }
-    struct queued_frame item;
+    struct queued_frame item = {0}, scratch;
     uint16_t next;
     int err = zmk_ptp_split_decode(wire, &next, &item.frame);
     if (err) {
         return err;
     }
+    uint16_t state = zmk_ptp_frame_state(&item.frame);
     k_spinlock_key_t key = k_spin_lock(&lock);
+    bool motion = sequence_valid && state == latest_state;
     if (sequence_valid) {
         int16_t delta = (int16_t)(next - sequence);
         if (!delta) {
-            err = memcmp(wire, &latest, sizeof(latest)) ? -EINVAL : 0;
+            /* Coverage may differ between a coalesced packet and its heartbeat. */
+            err = (memcmp(wire->data, latest.data, 4) ||
+                   memcmp(wire->data + 6, latest.data + 6, sizeof(latest) - 6))
+                      ? -EINVAL
+                      : 0;
             if (!err) {
                 expires = k_uptime_get() + LEASE_MS;
             }
@@ -80,17 +89,23 @@ int zmk_ptp_split_receive(uint8_t source, const struct zmk_ptp_split_frame *wire
             k_spin_unlock(&lock, key);
             return -ESTALE;
         }
-        if (delta != 1) {
+        uint16_t covered = next - sys_get_le16(wire->data + 4);
+        if (delta != 1 && (!motion || (uint16_t)(next - (sequence + 1)) > covered)) {
             reset();
+            motion = false;
         }
     }
+    item.header =
+        (struct zmk_ptp_queue_header){.ticket = ++ticket, .state = state, .motion = motion};
     item.epoch = epoch;
-    if (k_msgq_put(&frames, &item, K_NO_WAIT)) {
+    if (zmk_ptp_queue_put(&frames, &item, &scratch) < 0) {
         /* Drop complete frames only. Cancel the old lifetime before recovery. */
         reset();
         item.epoch = epoch;
+        item.header.motion = false;
         k_msgq_put(&frames, &item, K_NO_WAIT);
     }
+    latest_state = state;
     sequence = next;
     sequence_valid = true;
     latest = *wire;
@@ -106,14 +121,10 @@ static void forward(struct k_work *work) {
         if (expires && k_uptime_get() >= expires) {
             reset();
         }
-        if (pending_valid && pending.epoch != epoch) {
-            pending_valid = false;
-        }
         uint32_t current_epoch = epoch;
         bool cancel = cancel_pending;
-        if (!cancel && !pending_valid) {
-            pending_valid = k_msgq_get(&frames, &pending, K_NO_WAIT) == 0;
-        }
+        struct queued_frame item, scratch;
+        bool ready = !cancel && k_msgq_peek(&frames, &item) == 0;
         int64_t deadline = expires;
         k_spin_unlock(&lock, key);
         if (cancel) {
@@ -129,23 +140,22 @@ static void forward(struct k_work *work) {
             k_spin_unlock(&lock, key);
             continue;
         }
-        if (!pending_valid) {
+        if (!ready) {
             if (deadline) {
                 k_work_schedule(&forward_work, K_MSEC(MAX(1, deadline - k_uptime_get())));
             }
             return;
         }
-        int err = zmk_ptp_submit_split_frame(&pending.frame, pending.epoch);
-        if (err == -ESTALE) {
-            pending_valid = false;
+        int err = zmk_ptp_submit_split_frame(&item.frame, item.epoch);
+        if (!err || err == -ESTALE) {
+            key = k_spin_lock(&lock);
+            zmk_ptp_queue_get(&frames, item.header.ticket, &scratch);
+            k_spin_unlock(&lock, key);
             continue;
         }
-        if (err) {
-            int delay = (err == -ENODEV || err == -EMSGSIZE) ? HEARTBEAT_MS : 5;
-            k_work_schedule(&forward_work, K_MSEC(delay));
-            return;
-        }
-        pending_valid = false;
+        int delay = (err == -ENODEV || err == -EMSGSIZE) ? HEARTBEAT_MS : 5;
+        k_work_schedule(&forward_work, K_MSEC(delay));
+        return;
     }
 }
 

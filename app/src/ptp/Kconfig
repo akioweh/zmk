@@ -32,9 +32,9 @@ config ZMK_TRACKPAD_LOGICAL_Y
 if ZMK_SPLIT
 
 config ZMK_TRACKPAD_SPLIT_QUEUE_SIZE
-    int "Maximum complete contact frames queued for split transport"
-    range 1 64
-    default 8
+    int "Maximum contact transitions/latest motion queued for split transport"
+    range 2 64
+    default 4
 
 if ZMK_SPLIT_ROLE_CENTRAL
 
@@ -73,9 +73,9 @@ config ZMK_TRACKPAD_PAD_TYPE
 if ZMK_BLE
 
 config ZMK_BLE_PTP_REPORT_QUEUE_SIZE
-    int "Maximum complete PTP reports queued for Bluetooth"
-    range 1 64
-    default 8
+    int "Maximum contact transitions/latest motion queued for Bluetooth"
+    range 2 64
+    default 4
 
 endif
 

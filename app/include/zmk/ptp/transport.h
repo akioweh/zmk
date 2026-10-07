@@ -38,6 +38,9 @@ struct zmk_ptp_report {
     uint8_t count_buttons;
 } __packed;
 
+/* Stable contact/button state for queue coalescing; explicit lifts are barriers. */
+uint16_t zmk_ptp_report_state(const struct zmk_ptp_report *report, bool *lift);
+
 /* Core lifecycle hooks and HID backend helpers, not the driver interface. */
 void zmk_ptp_set_endpoint(struct zmk_endpoint_instance endpoint);
 void zmk_ptp_reset_endpoint(struct zmk_endpoint_instance endpoint);
