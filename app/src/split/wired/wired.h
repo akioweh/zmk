@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <errno.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/device.h>
 
@@ -41,6 +42,32 @@ struct event_envelope {
 struct msg_postfix {
     uint32_t crc;
 } __packed;
+
+static inline int
+zmk_split_wired_event_data_size(const struct zmk_split_transport_peripheral_event *evt) {
+    switch (evt->type) {
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_CONTACT_FRAME:
+        return sizeof(evt->data.contact_frame);
+#endif
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT:
+        return sizeof(evt->data.input_event);
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT:
+        return sizeof(evt->data.key_position_event);
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_SENSOR_EVENT:
+        return sizeof(evt->data.sensor_event);
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT:
+        return sizeof(evt->data.battery_event);
+    default:
+        return -ENOTSUP;
+    }
+}
+
+static inline bool zmk_split_wired_event_is_valid(const struct event_envelope *env) {
+    int size = zmk_split_wired_event_data_size(&env->payload.event);
+    return size >= 0 &&
+           env->prefix.payload_size == offsetof(struct event_payload, event.data) + size;
+}
 
 #define MSG_EXTRA_SIZE (sizeof(struct msg_prefix) + sizeof(struct msg_postfix))
 

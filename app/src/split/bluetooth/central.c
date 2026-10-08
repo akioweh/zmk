@@ -33,6 +33,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/pointing/input_split.h>
 #include <zmk/hid_indicators_types.h>
 #include <zmk/physical_layouts.h>
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+#include <zmk/ptp/split.h>
+#endif
 
 static int start_scanning(void);
 
@@ -51,6 +54,10 @@ struct peripheral_slot {
     struct bt_gatt_subscribe_params subscribe_params;
     struct bt_gatt_subscribe_params sensor_subscribe_params;
     struct bt_gatt_discover_params sub_discover_params;
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    struct bt_gatt_subscribe_params contact_subscribe_params;
+    struct bt_gatt_discover_params contact_discover_params;
+#endif
     uint16_t run_behavior_handle;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     struct bt_gatt_subscribe_params batt_lvl_subscribe_params;
@@ -214,6 +221,12 @@ int release_peripheral_slot(int index) {
 
     // Clean up previously discovered handles;
     slot->subscribe_params.value_handle = 0;
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    slot->contact_subscribe_params.value_handle = 0;
+    if (index == CONFIG_ZMK_TRACKPAD_SPLIT_SOURCE) {
+        zmk_ptp_split_reset();
+    }
+#endif
     slot->run_behavior_handle = 0;
     slot->selected_physical_layout_handle = 0;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
@@ -261,6 +274,33 @@ static void notify_transport_status(void);
 static void notify_status_work_cb(struct k_work *_work) { notify_transport_status(); }
 
 static K_WORK_DEFINE(notify_status_work, notify_status_work_cb);
+
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+static int dispatch_contact_frame(uint8_t source,
+                                  struct zmk_split_transport_peripheral_event event);
+
+static uint8_t contact_frame_notify(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
+                                    const void *data, uint16_t length) {
+    if (!data) {
+        params->value_handle = 0;
+        return BT_GATT_ITER_STOP;
+    }
+    int source = peripheral_slot_index_for_conn(conn);
+    if (source < 0) {
+        return BT_GATT_ITER_CONTINUE;
+    }
+    struct zmk_split_transport_peripheral_event event = {
+        .type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_CONTACT_FRAME,
+    };
+    if (zmk_ptp_split_unpack(&event.data.contact_frame, data, length)) {
+        return BT_GATT_ITER_CONTINUE;
+    }
+    /* The contact bridge has its own complete-frame queue. Do not crowd the
+     * key-position queue or leave source IDs queued across reconnection. */
+    dispatch_contact_frame(source, event);
+    return BT_GATT_ITER_CONTINUE;
+}
+#endif
 
 #if ZMK_KEYMAP_HAS_SENSORS
 
@@ -582,6 +622,15 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             slot->sensor_subscribe_params.value = BT_GATT_CCC_NOTIFY;
             split_central_subscribe(conn, &slot->sensor_subscribe_params);
 #endif /* ZMK_KEYMAP_HAS_SENSORS */
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+        } else if (!bt_uuid_cmp(chrc_uuid, BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CONTACT_FRAME_UUID))) {
+            slot->contact_subscribe_params.disc_params = &slot->contact_discover_params;
+            slot->contact_subscribe_params.end_handle = slot->discover_params.end_handle;
+            slot->contact_subscribe_params.value_handle = bt_gatt_attr_value_handle(attr);
+            slot->contact_subscribe_params.notify = contact_frame_notify;
+            slot->contact_subscribe_params.value = BT_GATT_CCC_NOTIFY;
+            split_central_subscribe(conn, &slot->contact_subscribe_params);
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
         } else if (bt_uuid_cmp(chrc_uuid, BT_UUID_DECLARE_128(ZMK_SPLIT_BT_INPUT_EVENT_UUID)) ==
                    0) {
@@ -683,6 +732,12 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
         }
 #endif // IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
         break;
+    }
+
+    /* Discover the entire service when contacts are enabled: optional contact
+     * characteristics can follow the ordinary required characteristics. */
+    if (IS_ENABLED(CONFIG_ZMK_TRACKPAD)) {
+        return BT_GATT_ITER_CONTINUE;
     }
 
     bool subscribed = slot->run_behavior_handle && slot->subscribe_params.value_handle &&
@@ -1264,6 +1319,13 @@ static const struct zmk_split_transport_central_api central_api = {
 };
 
 ZMK_SPLIT_TRANSPORT_CENTRAL_REGISTER(bt_central, &central_api, CONFIG_ZMK_SPLIT_BLE_PRIORITY);
+
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+static int dispatch_contact_frame(uint8_t source,
+                                  struct zmk_split_transport_peripheral_event event) {
+    return zmk_split_transport_central_peripheral_event_handler(&bt_central, source, event);
+}
+#endif
 
 static void notify_transport_status(void) {
     if (transport_status_cb) {

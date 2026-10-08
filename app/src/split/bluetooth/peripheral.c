@@ -84,8 +84,13 @@ static void advertising_cb(struct k_work *work) {
 
 K_WORK_DEFINE(advertising_work, advertising_cb);
 
+static void notify_transport_status(void);
+static void notify_status_work_cb(struct k_work *_work) { notify_transport_status(); }
+static K_WORK_DEFINE(notify_status_work, notify_status_work_cb);
+
 static void connected(struct bt_conn *conn, uint8_t err) {
     is_connected = (err == 0);
+    k_work_submit(&notify_status_work);
 
     raise_zmk_split_peripheral_status_changed(
         (struct zmk_split_peripheral_status_changed){.connected = is_connected});
@@ -111,6 +116,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
     LOG_DBG("Disconnected from %s (reason 0x%02x)", addr, reason);
 
     is_connected = false;
+    k_work_submit(&notify_status_work);
 
     raise_zmk_split_peripheral_status_changed(
         (struct zmk_split_peripheral_status_changed){.connected = is_connected});
@@ -195,12 +201,6 @@ static int split_peripheral_bt_set_enabled(bool en) {
         return 0;
     }
 }
-
-static void notify_transport_status(void);
-
-static void notify_status_work_cb(struct k_work *_work) { notify_transport_status(); }
-
-static K_WORK_DEFINE(notify_status_work, notify_status_work_cb);
 
 static bool settings_loaded = false;
 

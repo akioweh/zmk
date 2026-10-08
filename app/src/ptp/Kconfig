@@ -1,0 +1,146 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+menuconfig ZMK_TRACKPAD
+    bool "Native multitouch touchpad (PTP)"
+    depends on ZMK_USB || ZMK_BLE || ZMK_SPLIT
+    select BT_GATT_AUTO_UPDATE_MTU if ZMK_SPLIT_ROLE_CENTRAL && ZMK_SPLIT_BLE
+    help
+      Enable native contact reporting over a separate USB HID interface and
+      Bluetooth HID service. Drivers submit full snapshots via zmk/ptp.h.
+      Split peripherals forward atomic contact frames via the existing split
+      transport. Enable this on both halves; it does not enable sensor drivers.
+      Native touchpad mode only; no mouse-mode fallback or Windows certification.
+
+if ZMK_TRACKPAD
+
+config ZMK_TRACKPAD_FINGERS
+    int "Maximum concurrent contacts"
+    range 3 5
+    default 5
+
+config ZMK_TRACKPAD_LOGICAL_X
+    int "Maximum X coordinate"
+    range 1 32767
+    default 4095
+
+config ZMK_TRACKPAD_LOGICAL_Y
+    int "Maximum Y coordinate"
+    range 1 32767
+    default 4095
+
+config ZMK_PTP_TEST_SOURCE
+    bool "Synthetic peripheral touchpad source (diagnostic only)"
+    depends on ZMK_SPLIT && !ZMK_SPLIT_ROLE_CENTRAL
+    help
+      Replace hardware sampling with repeating 100 Hz horizontal, vertical
+      and two-contact strokes separated by lifts. For live transport tests
+      only; never enable in normal firmware. Sensor modules must exclude
+      themselves when this is enabled.
+
+if ZMK_SPLIT
+
+config ZMK_TRACKPAD_SPLIT_QUEUE_SIZE
+    int "Maximum contact transitions/latest motion queued for split transport"
+    range 2 64
+    default 4
+
+if ZMK_SPLIT_ROLE_CENTRAL
+
+config ZMK_TRACKPAD_SPLIT_SOURCE
+    int "Split peripheral supplying the logical touchpad"
+    range 0 255
+    default 0
+    help
+      Existing split transport source ID. One logical touchpad is supported;
+      do not mix local and peripheral producers.
+
+endif
+
+endif
+
+if !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
+
+config ZMK_PTP_TOUCH
+    bool "PTP touch-state input bridge"
+    default y
+    depends on ZMK_POINTING && DT_HAS_ZMK_PTP_TOUCH_ENABLED
+    help
+      Emit INPUT_BTN_TOUCH press/release transitions for confident contacts
+      through an enabled zmk,ptp-touch device. Use an input listener and
+      behavior processor to bind touch state to a momentary layer.
+      Motion and buttons remain exclusively on the native PTP path.
+
+config ZMK_TRACKPAD_PHYSICAL_X
+    int "Surface width in tenths of a millimeter"
+    range 1 32767
+    default 1000
+    help
+      Set this to the actual active surface width, not the PCB width.
+      The default is a placeholder, not a sensor calibration.
+
+config ZMK_TRACKPAD_PHYSICAL_Y
+    int "Surface height in tenths of a millimeter"
+    range 1 32767
+    default 1000
+
+config ZMK_TRACKPAD_PAD_TYPE
+    int "Button type (0 clickpad, 1 pressure pad, 2 external buttons only)"
+    range 0 2
+    default 2
+
+if ZMK_BLE
+
+config ZMK_BLE_PTP_PACING
+    bool "Pace pending Bluetooth motion to the granted connection interval"
+    default y
+    help
+      Coalesce motion until the actual interval plus a small margin has
+      elapsed since the last successful admission. Transitions bypass the
+      gate. This reduces burst submissions, not guaranteed radio delivery
+      spacing; frames already admitted to Bluetooth cannot be withdrawn.
+
+config ZMK_BLE_PTP_PACE_MARGIN_US
+    int "Motion pacing margin (microseconds)"
+    depends on ZMK_BLE_PTP_PACING
+    range 0 10000
+    default 500
+
+config ZMK_BLE_PTP_PACE_FALLBACK_US
+    int "Motion pacing fallback without connection information (microseconds)"
+    depends on ZMK_BLE_PTP_PACING
+    range 1000 4000000
+    default 10000
+
+config ZMK_BLE_PTP_FEATURE_PAD_BYTE
+    bool "Pad BLE feature reads for legacy BlueZ GET_REPORT compatibility"
+    default n
+    help
+      Append a dummy byte to BLE feature reads. Upstream BlueZ 5.87 loses
+      the last byte of numbered GET_REPORT replies; fixed hosts trim the
+      extra byte to the requested report length. Prefer updating BlueZ;
+      enable only for an affected host. USB and feature writes are unchanged.
+
+config ZMK_BLE_PTP_REPORT_QUEUE_SIZE
+    int "Maximum contact transitions/latest motion queued for Bluetooth"
+    range 2 64
+    default 4
+
+endif
+
+if ZMK_USB
+
+config USB_HID_DEVICE_COUNT
+    default 2
+
+config HID_INTERRUPT_EP_MPS
+    default 64
+
+config USB_REQUEST_BUFFER_SIZE
+    default 512
+
+endif
+
+endif # Host-facing configuration
+
+endif # ZMK_TRACKPAD

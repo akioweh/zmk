@@ -1,0 +1,33 @@
+tests:
+  zmk.ptp.core:
+    platform_allow:
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim/native/64
+    tags:
+      - hid
+      - ptp
+    harness: ztest
+  zmk.ptp.compat:
+    extra_args:
+      - EXTRA_CONF_FILE=compat.conf
+    platform_allow:
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim/native/64
+    tags:
+      - hid
+      - ptp
+    harness: ztest
+  zmk.ptp.peripheral:
+    extra_args:
+      - EXTRA_CONF_FILE=peripheral.conf
+    platform_allow:
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim/native/64
+    tags:
+      - hid
+      - ptp
+      - split
+    harness: ztest

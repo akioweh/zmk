@@ -1,0 +1,5 @@
+/ {
+    ptp_touch_test: ptp_touch {
+        compatible = "zmk,ptp-touch";
+    };
+};

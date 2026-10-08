@@ -1,0 +1,35 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+mainmenu "PTP core tests"
+
+# These transport flags enable mocked backend calls, not real USB/Bluetooth.
+config ZMK_USB
+    bool
+    default y
+
+config ZMK_BLE
+    bool
+    default y
+
+config ZMK_SPLIT
+    bool
+    default y
+
+config ZMK_SPLIT_ROLE_CENTRAL
+    bool "Split central test variant"
+    default y
+
+config ZMK_POINTING
+    bool
+    default y if ZMK_SPLIT_ROLE_CENTRAL
+    select INPUT
+
+config ZMK_TRACKPAD_PHYSICAL_X
+    default 500
+
+config ZMK_TRACKPAD_PHYSICAL_Y
+    default 500
+
+rsource "../../src/ptp/Kconfig"
+source "Kconfig.zephyr"

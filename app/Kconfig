@@ -373,6 +373,7 @@ endif # ZMK_BACKLIGHT
 endmenu # Display/LED Options
 
 rsource "src/pointing/Kconfig"
+rsource "src/ptp/Kconfig"
 
 menu "Power Management"
 

@@ -63,13 +63,13 @@ int set_state(enum zmk_activity_state state) {
 
 enum zmk_activity_state zmk_activity_get_state(void) { return activity_state; }
 
-static int note_activity(void) {
+int zmk_activity_note(void) {
     activity_last_uptime = k_uptime_get();
 
     return set_state(ZMK_ACTIVITY_ACTIVE);
 }
 
-static int activity_event_listener(const zmk_event_t *eh) { return note_activity(); }
+static int activity_event_listener(const zmk_event_t *eh) { return zmk_activity_note(); }
 
 void activity_work_handler(struct k_work *work) {
     int32_t current = k_uptime_get();
@@ -112,7 +112,7 @@ ZMK_SUBSCRIPTION(activity, zmk_sensor_event);
 
 #if IS_ENABLED(CONFIG_ZMK_POINTING)
 
-static void note_activity_work_cb(struct k_work *_work) { note_activity(); }
+static void note_activity_work_cb(struct k_work *_work) { zmk_activity_note(); }
 
 K_WORK_DEFINE(note_activity_work, note_activity_work_cb);
 
