@@ -17,7 +17,6 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 
-#include <drivers/behavior.h>
 #include <zmk/stdlib.h>
 #include <zmk/behavior.h>
 #include <zmk/matrix.h>
@@ -393,6 +392,7 @@ static int zmk_split_bt_report_input(uint8_t reg, uint8_t type, uint16_t code, i
 
 BUILD_ASSERT(CONFIG_BT_L2CAP_TX_MTU >= ZMK_PTP_SPLIT_FRAME_SIZE + 3);
 BUILD_ASSERT(CONFIG_BT_BUF_ACL_RX_SIZE >= ZMK_PTP_SPLIT_FRAME_SIZE + 7);
+BUILD_ASSERT(CONFIG_BT_BUF_ACL_TX_SIZE >= ZMK_PTP_SPLIT_FRAME_SIZE + 7);
 
 struct contact_notify_item {
     struct zmk_ptp_queue_header header;
@@ -405,6 +405,7 @@ static struct k_spinlock contact_lock;
 static uint32_t contact_ticket;
 static struct bt_conn *contact_last_conn;
 static uint16_t contact_last_state, contact_last_sequence;
+static unsigned int contact_in_flight;
 static bool contact_seen;
 
 static const struct bt_gatt_attr *contact_attr(void) {
@@ -415,16 +416,27 @@ static const struct bt_gatt_attr *contact_attr(void) {
 static void contact_notify(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(contact_notify_work, contact_notify);
 
+static void contact_notify_complete(struct bt_conn *conn, void *user_data) {
+    k_spinlock_key_t key = k_spin_lock(&contact_lock);
+    if (contact_last_conn == conn && contact_in_flight > 0) {
+        contact_in_flight--;
+    }
+    k_spin_unlock(&contact_lock, key);
+    k_work_schedule(&contact_notify_work, K_NO_WAIT);
+}
+
 static void contact_notify(struct k_work *work) {
     struct contact_notify_item item, scratch;
     while (true) {
         k_spinlock_key_t key = k_spin_lock(&contact_lock);
         bool ready = k_msgq_peek(&contact_msgq, &item) == 0;
-        if (ready) {
+        bool motion = ready && item.header.motion && k_msgq_num_used_get(&contact_msgq) == 1;
+        bool wait = motion && contact_in_flight > 0;
+        if (ready && !wait) {
             bt_conn_ref(item.conn); /* Own the unlocked copy, even if the head is replaced. */
         }
         k_spin_unlock(&contact_lock, key);
-        if (!ready) {
+        if (!ready || wait) {
             return;
         }
         uint16_t sequence = sys_le16_to_cpu(item.frame.sequence);
@@ -433,12 +445,29 @@ static void contact_notify(struct k_work *work) {
             first = sequence; /* A very long stall must recover via cancellation, not wrap. */
         }
         item.frame.first_sequence = sys_cpu_to_le16(first);
-        struct bt_gatt_notify_params params = {
-            .attr = contact_attr(),
-            .data = &item.frame,
-            .len = zmk_ptp_split_size(&item.frame),
-        };
-        int err = bt_gatt_notify_cb(item.conn, &params);
+        int err = -ENOTCONN;
+        key = k_spin_lock(&contact_lock);
+        if (contact_last_conn == item.conn && contact_seen) {
+            contact_in_flight++;
+            err = 0;
+        }
+        k_spin_unlock(&contact_lock, key);
+        if (!err) {
+            struct bt_gatt_notify_params params = {
+                .attr = contact_attr(),
+                .data = &item.frame,
+                .len = zmk_ptp_split_size(&item.frame),
+                .func = contact_notify_complete,
+            };
+            err = bt_gatt_notify_cb(item.conn, &params);
+            if (err) {
+                key = k_spin_lock(&contact_lock);
+                if (contact_last_conn == item.conn && contact_in_flight > 0) {
+                    contact_in_flight--;
+                }
+                k_spin_unlock(&contact_lock, key);
+            }
+        }
         bt_conn_unref(item.conn);
         if (err == -ENOMEM || err == -EAGAIN || err == -ENOBUFS) {
             k_work_schedule(&contact_notify_work, K_MSEC(5));
@@ -457,6 +486,7 @@ static void contact_disconnected(struct bt_conn *conn, uint8_t reason) {
     k_spinlock_key_t key = k_spin_lock(&contact_lock);
     if (contact_last_conn == conn) {
         contact_seen = false;
+        contact_in_flight = 0;
         contact_last_conn = NULL;
     }
     k_spin_unlock(&contact_lock, key);
@@ -494,6 +524,9 @@ static int report_contact_frame(const struct zmk_ptp_split_frame *frame) {
     } else {
         uint16_t state = zmk_ptp_frame_state(&decoded);
         k_spinlock_key_t key = k_spin_lock(&contact_lock);
+        if (contact_last_conn != item.conn) {
+            contact_in_flight = 0;
+        }
         item.header = (struct zmk_ptp_queue_header){
             .ticket = ++contact_ticket,
             .state = state,

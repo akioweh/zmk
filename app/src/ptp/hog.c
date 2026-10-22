@@ -45,10 +45,13 @@ struct ptp_hog_profile {
     atomic_ptr_t bound_conn;   /* Owned reference, independent of queued reports. */
     struct bt_conn *last_conn; /* Borrowed; cleared by the disconnect callback. */
     uint16_t last_state;
-    bool report_seen, pace_sent;
-    int64_t pace_last;
+    unsigned int in_flight;
+    bool report_seen;
 };
 static struct ptp_hog_profile profiles[ZMK_BLE_PROFILE_COUNT];
+
+BUILD_ASSERT(CONFIG_BT_BUF_ACL_TX_SIZE >= sizeof(struct zmk_ptp_report) + 6,
+             "PTP BLE notification must fit one Link Layer ACL PDU without fragmentation");
 static void notify_work(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(notifier, notify_work);
 
@@ -196,8 +199,18 @@ static int connection_ready(struct bt_conn *conn) {
     return 0;
 }
 
+static void notify_complete(struct bt_conn *conn, void *user_data) {
+    struct ptp_hog_profile *profile = user_data;
+    k_spinlock_key_t key = k_spin_lock(&report_lock);
+    if (profile->last_conn == conn && profile->in_flight > 0) {
+        profile->in_flight--;
+    }
+    k_spin_unlock(&report_lock, key);
+    k_work_schedule(&notifier, K_NO_WAIT);
+}
+
 static void notify_work(struct k_work *work) {
-    k_ticks_t wait = 0;
+    bool retry = false;
     for (int profile = 0; profile < ZMK_BLE_PROFILE_COUNT; profile++) {
         struct queued_report entry, scratch;
         while (true) {
@@ -205,13 +218,12 @@ static void notify_work(struct k_work *work) {
             bool ready = k_msgq_peek(&profiles[profile].reports, &entry) == 0;
             bool motion = ready && entry.header.motion &&
                           k_msgq_num_used_get(&profiles[profile].reports) == 1;
-            bool sent = profiles[profile].pace_sent;
-            int64_t last = profiles[profile].pace_last;
-            if (ready) {
+            bool wait = zmk_ptp_pace_wait(motion, profiles[profile].in_flight);
+            if (ready && !wait) {
                 bt_conn_ref(entry.conn);
             }
             k_spin_unlock(&report_lock, key);
-            if (!ready) {
+            if (!ready || wait) {
                 break;
             }
             int err = connection_ready(entry.conn);
@@ -220,39 +232,41 @@ static void notify_work(struct k_work *work) {
                 break; /* Resume/disconnect will schedule us again. */
             }
             if (!err) {
-                struct bt_conn_info info;
-                uint32_t interval_us = !bt_conn_get_info(entry.conn, &info)
-                                           ? BT_CONN_INTERVAL_TO_US(info.le.interval)
-                                           : 0;
-                k_ticks_t due =
-                    zmk_ptp_pace_wait(motion, sent, last, k_uptime_ticks(), interval_us);
-                if (due) {
-                    bt_conn_unref(entry.conn);
-                    wait = wait ? MIN(wait, due) : due;
-                    break;
+                key = k_spin_lock(&report_lock);
+                if (profiles[profile].last_conn == entry.conn && profiles[profile].report_seen) {
+                    profiles[profile].in_flight++;
+                } else {
+                    err = -ENOTCONN;
                 }
+                k_spin_unlock(&report_lock, key);
+            }
+            if (!err) {
                 struct bt_gatt_notify_params params = {
                     .attr = &ptp_svc.attrs[PTP_INPUT_ATTR],
                     .data = (const uint8_t *)&entry.report + 1,
                     .len = sizeof(entry.report) - 1,
+                    .func = notify_complete,
+                    .user_data = &profiles[profile],
                 };
                 /* System workqueue context makes resource exhaustion non-blocking. */
                 err = bt_gatt_notify_cb(entry.conn, &params);
+                if (err) {
+                    key = k_spin_lock(&report_lock);
+                    if (profiles[profile].last_conn == entry.conn &&
+                        profiles[profile].in_flight > 0) {
+                        profiles[profile].in_flight--;
+                    }
+                    k_spin_unlock(&report_lock, key);
+                }
                 if (err && err != -ENOTCONN) {
                     bt_conn_unref(entry.conn);
-                    k_ticks_t delay = k_ms_to_ticks_ceil32(5);
-                    wait = wait ? MIN(wait, delay) : delay;
+                    retry = true;
                     break; /* Retain transitions, but allow pending motion to be refreshed. */
                 }
             }
             bt_conn_unref(entry.conn);
             /* Ended HID sessions are never replayed to a new peer. */
             key = k_spin_lock(&report_lock);
-            if (!err && profiles[profile].last_conn == entry.conn &&
-                profiles[profile].report_seen) {
-                profiles[profile].pace_sent = true;
-                profiles[profile].pace_last = k_uptime_ticks();
-            }
             bool removed =
                 zmk_ptp_queue_get(&profiles[profile].reports, entry.header.ticket, &scratch);
             k_spin_unlock(&report_lock, key);
@@ -261,9 +275,8 @@ static void notify_work(struct k_work *work) {
             }
         }
     }
-    if (wait) {
-        /* Do not postpone an earlier wake scheduled by a new transition. */
-        k_work_schedule(&notifier, K_TICKS(wait));
+    if (retry) {
+        k_work_schedule(&notifier, K_MSEC(5));
     }
 }
 
@@ -297,7 +310,7 @@ int zmk_ptp_hog_send_report(struct zmk_endpoint_instance endpoint,
     uint16_t state = zmk_ptp_report_state(report, &lift);
     k_spinlock_key_t key = k_spin_lock(&report_lock);
     if (profiles[profile].last_conn != conn) {
-        profiles[profile].pace_sent = false;
+        profiles[profile].in_flight = 0;
     }
     entry.header = (struct zmk_ptp_queue_header){
         .ticket = ++report_ticket,
@@ -328,7 +341,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
     for (int i = 0; i < ZMK_BLE_PROFILE_COUNT; i++) {
         if (profiles[i].last_conn == conn) {
             profiles[i].report_seen = false;
-            profiles[i].pace_sent = false;
+            profiles[i].in_flight = 0;
             profiles[i].last_conn = NULL;
         }
     }

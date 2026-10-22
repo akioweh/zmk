@@ -185,22 +185,13 @@ ZTEST(ptp_queue, test_compact_lengths_and_sequence_coverage_wrap) {
 }
 
 ZTEST(ptp_queue, test_motion_pace_and_transition_bypass) {
-    int64_t last = 100;
-    zassert_equal(zmk_ptp_pace_wait(false, true, last, last, 7500), 0);
-    zassert_equal(zmk_ptp_pace_wait(true, false, last, last, 7500), 0);
+    zassert_false(zmk_ptp_pace_wait(false, 1));
+    zassert_false(zmk_ptp_pace_wait(true, 0));
 #if IS_ENABLED(CONFIG_ZMK_BLE_PTP_PACING)
-    k_ticks_t period = k_us_to_ticks_ceil64(7500 + CONFIG_ZMK_BLE_PTP_PACE_MARGIN_US);
-    zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 7500), period);
-    zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period - 1, 7500), 1);
-    zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period, 7500), 0);
-    zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period + 1, 7500), 0);
-    zassert_equal(zmk_ptp_pace_wait(true, true, last, last + period + 100000, 7500), 0);
-    zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 15000),
-                  k_us_to_ticks_ceil64(15000 + CONFIG_ZMK_BLE_PTP_PACE_MARGIN_US));
-    zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 0),
-                  k_us_to_ticks_ceil64(CONFIG_ZMK_BLE_PTP_PACE_FALLBACK_US));
+    zassert_true(zmk_ptp_pace_wait(true, 1));
+    zassert_true(zmk_ptp_pace_wait(true, 3));
 #else
-    zassert_equal(zmk_ptp_pace_wait(true, true, last, last, 7500), 0);
+    zassert_false(zmk_ptp_pace_wait(true, 1));
 #endif
 }
 

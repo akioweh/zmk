@@ -3,6 +3,9 @@
 
 mainmenu "PTP core tests"
 
+config ZMK_PTP_BLE_BACKEND_TEST
+    bool "Exercise real BLE backend workers with mocked GATT"
+
 # These transport flags enable mocked backend calls, not real USB/Bluetooth.
 config ZMK_USB
     bool

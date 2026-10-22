@@ -92,25 +92,13 @@ config ZMK_TRACKPAD_PAD_TYPE
 if ZMK_BLE
 
 config ZMK_BLE_PTP_PACING
-    bool "Pace pending Bluetooth motion to the granted connection interval"
+    bool "Coalesce pending Bluetooth motion while GATT notifications are in flight"
     default y
     help
-      Coalesce motion until the actual interval plus a small margin has
-      elapsed since the last successful admission. Transitions bypass the
-      gate. This reduces burst submissions, not guaranteed radio delivery
-      spacing; frames already admitted to Bluetooth cannot be withdrawn.
-
-config ZMK_BLE_PTP_PACE_MARGIN_US
-    int "Motion pacing margin (microseconds)"
-    depends on ZMK_BLE_PTP_PACING
-    range 0 10000
-    default 500
-
-config ZMK_BLE_PTP_PACE_FALLBACK_US
-    int "Motion pacing fallback without connection information (microseconds)"
-    depends on ZMK_BLE_PTP_PACING
-    range 1000 4000000
-    default 10000
+      Hold isolated pending motion in the coalescing queue while an earlier
+      notification on the same connection is still awaiting controller
+      admission. Transitions and motion preceding a transition bypass the
+      gate.
 
 config ZMK_BLE_PTP_FEATURE_PAD_BYTE
     bool "Pad BLE feature reads for legacy BlueZ GET_REPORT compatibility"
@@ -142,5 +130,15 @@ config USB_REQUEST_BUFFER_SIZE
 endif
 
 endif # Host-facing configuration
+
+if BT
+
+config BT_BUF_ACL_TX_SIZE
+    default 69
+
+config BT_CONN_FRAG_COUNT
+    default 3 if BT_MAX_CONN < 3
+
+endif # BT
 
 endif # ZMK_TRACKPAD

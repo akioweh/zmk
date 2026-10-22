@@ -40,7 +40,7 @@ Set `CONFIG_ZMK_TRACKPAD=y` on the central/unibody firmware, and on any peripher
 - `CONFIG_ZMK_TRACKPAD_PHYSICAL_X/Y`: actual active surface size in 0.1 mm units. Defaults are placeholders, not calibration.
 - `CONFIG_ZMK_TRACKPAD_PAD_TYPE`: 0 clickpad, 1 pressure pad, 2 external buttons only (default).
 - `CONFIG_ZMK_BLE_PTP_REPORT_QUEUE_SIZE`: queued transitions/latest motion per Bluetooth profile, default 4.
-- `CONFIG_ZMK_BLE_PTP_PACING`: enabled; isolated pending motion waits for the granted connection interval plus `CONFIG_ZMK_BLE_PTP_PACE_MARGIN_US` (500 µs). Without connection info, `CONFIG_ZMK_BLE_PTP_PACE_FALLBACK_US` is 10000 µs. Transitions, explicit lifts and motion preceding a transition bypass the gate. Only successful admission advances the deadline. This limits burst submissions, not actual radio arrival spacing after retries.
+- `CONFIG_ZMK_BLE_PTP_PACING`: enabled; isolated pending motion waits in the coalescing queue while an earlier GATT notification on the same connection is still in flight. Transitions, explicit lifts and motion preceding a transition bypass the gate.
 - `CONFIG_ZMK_BLE_PTP_FEATURE_PAD_BYTE`: default off. Optional extra zero byte on BLE feature reads for the numbered GET_REPORT truncation in upstream BlueZ 5.87; prefer the upstream host fix (`dc2eb1394f4f`). USB and feature writes remain standard. Fixed hosts trim the extra byte to the requested report length; physical host interoperability still needs verification.
 - `CONFIG_ZMK_TRACKPAD_SPLIT_QUEUE_SIZE`: queued transitions/latest motion per split stage, default 4.
 - `CONFIG_ZMK_TRACKPAD_SPLIT_SOURCE`: central-side split source ID supplying the logical touchpad, default 0. One logical touchpad is supported; do not mix local and remote producers. Physical dimensions and pad type are host-side settings only.
@@ -145,7 +145,19 @@ ZEPHYR_TOOLCHAIN_VARIANT=host west build <zmk>/app/tests/ptp \
   -d build/ptp-peripheral-tests -b native_sim/native/64 -- \
   -DEXTRA_CONF_FILE=peripheral.conf
 build/ptp-peripheral-tests/zephyr/zephyr.exe
+
+ZEPHYR_TOOLCHAIN_VARIANT=host west build <zmk>/app/tests/ptp \
+  -d build/ptp-ble-tests -b native_sim/native/64 -- \
+  -DEXTRA_CONF_FILE=ble.conf -DEXTRA_DTC_OVERLAY_FILE=ble.overlay
+build/ptp-ble-tests/zephyr/zephyr.exe
 ```
+
+The `ble.conf` variant compiles the production `hog.c` and split BLE `service.c`
+workers with mocked GATT/connection calls. It checks completion-driven motion
+coalescing, lift ordering, admission-error rollback/retry, late completion after
+reconnect, per-profile suspend and connection-reference cleanup. It does not
+simulate the Bluetooth stack, controller or radio. Other variants exercise the
+core with mocked backend admission.
 
 Sensor decoding and driver tests belong to their respective external modules.
 

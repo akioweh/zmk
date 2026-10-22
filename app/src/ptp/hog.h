@@ -21,20 +21,12 @@ static inline int zmk_ptp_get_ble_feature(struct zmk_endpoint_instance endpoint,
     return len;
 }
 
-/* Only isolated pending motion waits; a following transition flushes it.
- * Account for the granted interval in microseconds, not rounded milliseconds.
- * The caller records last only after successful transport admission. */
-static inline k_ticks_t zmk_ptp_pace_wait(bool motion, bool sent, int64_t last, int64_t now,
-                                          uint32_t interval_us) {
+/* Only isolated pending motion waits while a notification is in flight;
+ * a following transition flushes it immediately. */
+static inline bool zmk_ptp_pace_wait(bool motion, unsigned int in_flight) {
 #if IS_ENABLED(CONFIG_ZMK_BLE_PTP_PACING)
-    if (motion && sent) {
-        uint32_t us = interval_us ? interval_us + CONFIG_ZMK_BLE_PTP_PACE_MARGIN_US
-                                  : CONFIG_ZMK_BLE_PTP_PACE_FALLBACK_US;
-        /* Tick conversion is unsigned: cast before subtraction, or an expired
-         * deadline wraps and schedules motion effectively forever. */
-        int64_t period = k_us_to_ticks_ceil64(us);
-        return MAX(INT64_C(0), last + period - now);
-    }
+    return motion && in_flight > 0;
+#else
+    return false;
 #endif
-    return 0;
 }
