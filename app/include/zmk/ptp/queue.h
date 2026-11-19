@@ -17,26 +17,25 @@ struct zmk_ptp_queue_header {
     bool motion;
 };
 
-/* Reuse the bounded msgq rather than its private ring pointers. Rotation is
- * O(capacity), bounded by four entries in the default configuration. Scratch holds
- * the replaced entry on return 1, allowing its connection reference to be freed. */
+/* Zephyr can peek at the tail but cannot replace it. Rotate only to replace.
+ * On return 1, scratch holds the removed entry and any reference it owns. */
 static inline int zmk_ptp_queue_put(struct k_msgq *queue, void *item, void *scratch) {
-    struct zmk_ptp_queue_header *next = item;
+    struct zmk_ptp_queue_header *next = item, *tail = scratch;
     unsigned int count = k_msgq_num_used_get(queue);
-    if (next->motion) {
-        for (unsigned int i = 0; i < count; i++) {
-            k_msgq_get(queue, scratch, K_NO_WAIT);
-            struct zmk_ptp_queue_header *old = scratch;
-            if (i == count - 1 && old->motion && old->state == next->state &&
-                (uint16_t)(next->sequence - old->sequence) <= 1) {
-                next->first_sequence = old->first_sequence;
-                k_msgq_put(queue, item, K_NO_WAIT);
-                return 1;
-            }
-            k_msgq_put(queue, scratch, K_NO_WAIT);
-        }
+    if (!next->motion || !count || k_msgq_peek_at(queue, scratch, count - 1) ||
+        !tail->motion || tail->state != next->state ||
+        (uint16_t)(next->sequence - tail->sequence) > 1) {
+        return k_msgq_put(queue, item, K_NO_WAIT);
     }
-    return k_msgq_put(queue, item, K_NO_WAIT);
+
+    next->first_sequence = tail->first_sequence;
+    for (unsigned int i = 1; i < count; i++) {
+        k_msgq_get(queue, scratch, K_NO_WAIT);
+        k_msgq_put(queue, scratch, K_NO_WAIT);
+    }
+    k_msgq_get(queue, scratch, K_NO_WAIT);
+    k_msgq_put(queue, item, K_NO_WAIT);
+    return 1;
 }
 
 /* A concurrently replaced head is still pending, even if the old copy was

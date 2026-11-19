@@ -67,7 +67,10 @@ ZTEST(ptp_queue, test_full_queue_can_replace_motion_but_not_cross_state) {
         zassert_ok(put(i, i, false));
     }
     zassert_ok(put(4, 3, true));
-    zassert_equal(put(5, 3, true), 1);
+    struct item next = {.header = {.ticket = ++ticket, .state = 3, .motion = true}, .position = 5};
+    struct item removed;
+    zassert_equal(zmk_ptp_queue_put(&queue, &next, &removed), 1);
+    zassert_equal(removed.position, 4); /* Callers release the replaced entry's reference. */
     zassert_equal(put(6, 4, true), -ENOMSG);
     struct item item;
     for (int i = 1; i <= 3; i++) {
