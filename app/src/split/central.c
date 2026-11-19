@@ -11,6 +11,9 @@
 #include <zmk/split/central.h>
 #include <zmk/hid_indicators_types.h>
 #include <zmk/pointing/input_split.h>
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+#include <zmk/ptp/split.h>
+#endif
 
 #include <zephyr/logging/log.h>
 
@@ -38,6 +41,14 @@ int zmk_split_transport_central_peripheral_event_handler(
         return -EINVAL;
     }
     switch (ev.type) {
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_CONTACT_FRAME:
+        if (transport->api->get_status && transport->api->get_status().connections ==
+                                              ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_DISCONNECTED) {
+            return -ENODEV;
+        }
+        return zmk_ptp_split_receive(source, &ev.data.contact_frame);
+#endif
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT: {
         struct zmk_position_state_changed state_ev = {.source = source,
                                                       .position =
@@ -183,6 +194,9 @@ static int select_first_available_transport(void) {
                 }
             }
 
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+            zmk_ptp_split_reset();
+#endif
             active_transport = t;
             int err = 0;
             if (active_transport->api->set_enabled) {
@@ -201,6 +215,20 @@ static int transport_status_changed_cb(const struct zmk_split_transport_central 
     if (central == active_transport) {
         LOG_DBG("Central at %p changed status: enabled %d, available %d, connections %d", central,
                 status.enabled, status.available, status.connections);
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+        uint8_t sources[ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT];
+        int count = central->api->get_available_source_ids
+                        ? central->api->get_available_source_ids(sources)
+                        : 0;
+        bool present = false;
+        for (int i = 0; i < count; i++) {
+            present |= sources[i] == CONFIG_ZMK_TRACKPAD_SPLIT_SOURCE;
+        }
+        if (status.connections == ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_DISCONNECTED ||
+            (central->api->get_available_source_ids && !present)) {
+            zmk_ptp_split_reset();
+        }
+#endif
         if (status.connections == ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_DISCONNECTED) {
             return select_first_available_transport();
         }

@@ -12,6 +12,9 @@
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
 #include <zmk/physical_layouts.h>
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+#include <zmk/ptp/split.h>
+#endif
 
 #include <zmk/event_manager.h>
 #include <zmk/events/position_state_changed.h>
@@ -79,6 +82,14 @@ int zmk_split_peripheral_report_event(const struct zmk_split_transport_periphera
         return -ENODEV;
     }
 
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    if (event->type == ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_CONTACT_FRAME &&
+        active_transport->api->get_status &&
+        active_transport->api->get_status().connections ==
+            ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_DISCONNECTED) {
+        return -ENODEV;
+    }
+#endif
     return active_transport->api->report_event(event);
 }
 
@@ -107,6 +118,9 @@ static int select_first_available_transport(void) {
                 err = active_transport->api->set_enabled(true);
             }
 
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+            zmk_ptp_split_resume();
+#endif
             return err;
         }
     }
@@ -119,6 +133,11 @@ static int transport_status_changed_cb(const struct zmk_split_transport_peripher
     if (p == active_transport) {
         LOG_DBG("Peripheral at %p changed status: enabled %d, available %d, connections %d", p,
                 status.enabled, status.available, status.connections);
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+        if (status.connections != ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_DISCONNECTED) {
+            zmk_ptp_split_resume();
+        }
+#endif
         if (status.connections == ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_DISCONNECTED) {
             LOG_DBG("Find us a new active transport!");
 

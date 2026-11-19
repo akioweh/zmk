@@ -1,0 +1,11 @@
+/ {
+    chosen {
+        zmk,matrix-transform = &test_transform;
+    };
+    test_transform: test_transform {
+        compatible = "zmk,matrix-transform";
+        rows = <1>;
+        columns = <1>;
+        map = <0>;
+    };
+};

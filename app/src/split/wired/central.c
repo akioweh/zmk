@@ -469,11 +469,15 @@ static void publish_events_work(struct k_work *work) {
 #endif // IS_HALF_DUPLEX_MODE
 
     while (ring_buf_size_get(&rx_buf) > MSG_EXTRA_SIZE) {
-        struct event_envelope env;
+        struct event_envelope env = {0};
         int item_err =
             zmk_split_wired_get_item(&rx_buf, (uint8_t *)&env, sizeof(struct event_envelope));
         switch (item_err) {
         case 0:
+            if (!zmk_split_wired_event_is_valid(&env)) {
+                LOG_WRN("Invalid peripheral event length/type");
+                break;
+            }
             zmk_split_transport_central_peripheral_event_handler(&wired_central, env.payload.source,
                                                                  env.payload.event);
             break;

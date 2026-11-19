@@ -12,6 +12,9 @@
 #include <zmk/ble.h>
 #include <zmk/endpoints.h>
 #include <zmk/hid.h>
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+#include <zmk/ptp/transport.h>
+#endif
 #include <dt-bindings/zmk/hid_usage_pages.h>
 #include <zmk/usb_hid.h>
 #include <zmk/hog.h>
@@ -464,6 +467,9 @@ static int zmk_endpoints_init(void) {
 #endif
 
     current_instance = get_selected_instance();
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    zmk_ptp_set_endpoint(current_instance);
+#endif
 
     return 0;
 }
@@ -471,6 +477,9 @@ static int zmk_endpoints_init(void) {
 void zmk_endpoint_clear_reports(void) {
     zmk_hid_keyboard_clear();
     zmk_hid_consumer_clear();
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+    zmk_ptp_release();
+#endif
 #if IS_ENABLED(CONFIG_ZMK_POINTING)
     zmk_hid_mouse_clear();
 #endif // IS_ENABLED(CONFIG_ZMK_POINTING)
@@ -486,6 +495,9 @@ static void update_current_endpoint(void) {
         // Cancel all current keypresses so keys don't stay held on the old endpoint.
         zmk_endpoint_clear_reports();
 
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+        zmk_ptp_set_endpoint(new_instance);
+#endif
         current_instance = new_instance;
 
         char endpoint_str[ZMK_ENDPOINT_STR_LEN];

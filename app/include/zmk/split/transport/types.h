@@ -9,6 +9,9 @@
 #include <zmk/hid_indicators_types.h>
 #include <zmk/sensors.h>
 #include <zephyr/sys/util.h>
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+#include <zmk/ptp/frame.h>
+#endif
 
 enum zmk_split_transport_connections_status {
     ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_DISCONNECTED = 0,
@@ -30,6 +33,7 @@ enum zmk_split_transport_peripheral_event_type {
     ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_SENSOR_EVENT,
     ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT,
     ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT,
+    ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_CONTACT_FRAME,
 };
 
 struct zmk_split_transport_peripheral_event {
@@ -58,6 +62,9 @@ struct zmk_split_transport_peripheral_event {
         struct {
             uint8_t level;
         } battery_event;
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD)
+        struct zmk_ptp_split_frame contact_frame;
+#endif
     } data;
 } __packed;
 

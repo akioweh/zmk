@@ -16,6 +16,9 @@
 #include <zmk/events/usb_conn_state_changed.h>
 
 #include <zmk/usb_hid.h>
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD) && IS_ENABLED(CONFIG_ZMK_USB)
+#include <zmk/ptp/transport.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -64,6 +67,11 @@ void usb_status_cb(enum usb_dc_status_code status, const uint8_t *params) {
 #if IS_ENABLED(CONFIG_ZMK_USB_BOOT)
     if (status == USB_DC_RESET) {
         zmk_usb_hid_set_protocol(HID_PROTOCOL_REPORT);
+    }
+#endif
+#if IS_ENABLED(CONFIG_ZMK_TRACKPAD) && IS_ENABLED(CONFIG_ZMK_USB)
+    if (status == USB_DC_RESET || status == USB_DC_DISCONNECTED) {
+        zmk_ptp_usb_reset();
     }
 #endif
     usb_status = status;
