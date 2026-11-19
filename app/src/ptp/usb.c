@@ -94,7 +94,8 @@ int zmk_ptp_usb_send_report(const struct zmk_ptp_report *report) {
         }
         return -EAGAIN;
     }
-    if (k_sem_take(&hid_ready, K_MSEC(30))) {
+    /* Admission may run under ptp_lock on the system workqueue. */
+    if (k_sem_take(&hid_ready, K_NO_WAIT)) {
         return -EAGAIN;
     }
     uint32_t written = 0;

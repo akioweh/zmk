@@ -82,7 +82,8 @@ ZTEST(ptp_peripheral, test_offline_lift_replaces_cached_hold) {
     k_sleep(K_MSEC(20));
     uint16_t resumed_sequence;
     struct zmk_ptp_frame resumed = last(&resumed_sequence);
-    zassert_equal(resumed_sequence, (uint16_t)(sequence + 1));
+    zassert_true((uint16_t)(resumed_sequence - sequence) > 1,
+                 "Offline observations must not claim contiguous coverage");
     zassert_equal(resumed.contact_count, 0);
     zassert_equal(resumed.buttons, 0);
     k_sleep(K_MSEC(160));
@@ -128,7 +129,10 @@ ZTEST(ptp_peripheral, test_retry_preserves_observation_sequence) {
     error = 0;
     zassert_ok(zmk_ptp_submit_frame(&frame));
     zassert_equal(last(&initial).contact_count, 0);
-    zassert_equal(initial, (uint16_t)(retried + 1));
+    zassert_true((uint16_t)(initial - retried) > 1);
+    zassert_ok(zmk_ptp_submit_frame(&frame));
+    last(&retried);
+    zassert_equal(initial, retried);
 }
 
 static void from_isr(const void *unused) {
